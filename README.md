@@ -94,14 +94,44 @@ coche = nuevo config + seleccionar el adaptador en el bridge.
 
 ## Instalación
 
-### Requisitos
-- Servidor Linux (probado en Arch/CachyOS) con Python 3.11+, Tailscale.
-- Tablet Android 10+ (Termux, Termux:Boot, Termux:API, Tailscale).
-- Adaptador ELM327 Bluetooth.
-- Repo [vgate-bridge](https://github.com/josecarlosnieto91/vgate-bridge) para la
-  app Android.
+### Requisitos y dependencias
 
-### 1. Servidor (server)
+**Qué es obligatorio vs opcional** — el sistema funciona en dos capas:
+
+| Capa | Componente | ¿Obligatorio? | Para qué |
+|------|-----------|:---:|----------|
+| **Tablet** (en el coche) | Termux | ✅ | Ejecuta el recolector Python, GPS logger, crond y SSH |
+| | Termux:API | ✅ | GPS (`termux-location`) y wake-lock |
+| | Termux:Boot | ✅ | Auto-arranque al encender la tablet |
+| | Python 3 + cronie | ✅ | Runtime del recolector y auto-reparación (crond) |
+| | **Tailscale** | ⚠️ Opcional | Solo para acceso remoto al dashboard y sync cuando el coche no está en tu red WiFi |
+| | VgateBridge APK | ✅ | Puente Bluetooth SPP → TCP local :22000 |
+| **Servidor** (en casa) | Python 3.11+ | ✅ | Scripts + webapp Flask |
+| | Tailscale | ⚠️ Opcional | Solo para acceder al dashboard de forma remota |
+| | systemd user | ✅ | Webapp como servicio |
+
+**Sin Tailscale** el sistema sigue funcionando: la tablet sube datos por SCP solo cuando
+hay red (WiFi del coche/hotspot). Tailscale solo añade conectividad permanente y acceso
+remoto al dashboard.
+
+**Arquitectura de red — quién habla con quién:**
+
+```
+Adaptador ELM327 ──BT──▶ VgateBridge (APK, SERVIDOR TCP :22000 en la tablet)
+                                  ▲
+                                  │ 127.0.0.1:22000
+                                  │
+                        obd_local_collector.py (CLIENTE, en la tablet)
+                                  │
+                                  │ SCP (SSH)
+                                  ▼
+                        Servidor (Cassiopeia) → obd_telemetry.db → webapp :8765
+```
+
+El APK **no necesita servidor configurable**: es el servidor local. El destino
+remoto se configura en `obd_local_collector.py` (constantes `CASSIOPEIA` /
+`INCOMING_PATH` al inicio del fichero).
+
 ```bash
 git clone git@github-obd-telemetry:josecarlosnieto91/obd-telemetry.git ~/repos/obd-telemetry
 mkdir -p ~/.hermes/scripts ~/.hermes/data/incoming/processed ~/.hermes/data/tracks
@@ -138,11 +168,45 @@ car_status.py          cada 15 min  (diagnósticos + alertas)
 ```
 
 ### 3. Tablet (vehicle tablet)
-- Instalar la app desde el release de [vgate-bridge](https://github.com/josecarlosnieto91/vgate-bridge/releases).
-- Configurar Termux (SSH, crond, GPS, wake-lock) — ver scripts
-  `polar_boot_extra.sh` / `polar_watchdog.sh` en `collector/`.
-- Copiar `obd_local_collector.py` y `polar_gps_logger.py` a la tablet.
-- Desplegar: `bash ~/.hermes/scripts/deploy_obd_v3.sh` (scp + reinicio).
+
+**Instalar desde F-Droid** (no Play Store):
+1. **Termux** — runtime del recolector, GPS logger, SSH y crond.
+2. **Termux:API** — necesario para GPS (`termux-location`) y wake-lock.
+3. **Termux:Boot** — ejecuta los scripts de auto-arranque al encender la tablet.
+
+**Configurar Termux:**
+```bash
+pkg update && pkg install -y openssh python cronie termux-api
+sshd                                    # SSH en :8022 para el servidor
+mkdir -p ~/.termux/boot ~/.termux
+# Conceder a Termux:API → Permisos → Ubicación → Permitir siempre
+# Ajustes → Apps → Termux → Batería → Sin restricciones (evita que Android lo mate)
+```
+
+**Auto-arranque** — copiar los scripts del repo:
+```bash
+# Desde el servidor:
+scp collector/polar_boot_extra.sh tablet:~/
+scp collector/polar_watchdog.sh tablet:~/
+scp collector/obd_local_collector.py tablet:~/
+scp collector/polar_gps_logger.py tablet:~/
+# En la tablet:
+mkdir -p ~/.termux/boot
+cp ~/polar_boot_extra.sh ~/.termux/boot/start-services   # boot completo
+chmod +x ~/.termux/boot/start-services
+# El crond (cada minuto) ejecuta polar_boot_extra.sh como red de seguridad
+# para ciclos de corriente sin reinicio completo.
+```
+
+**App VgateBridge** — instalar el APK desde el release de
+[vgate-bridge](https://github.com/josecarlosnieto91/vgate-bridge/releases),
+abrirla una vez, emparejar el adaptador ELM327 por Bluetooth y seleccionarlo en
+la app (guardar la MAC). Con el modo coche activado, arranca solo al dar
+corriente.
+
+**Destino del sync** — en `obd_local_collector.py` de la tablet, editar las
+constantes `CASSIOPEIA` (usuario@host del servidor) e `INCOMING_PATH` si tu
+layout difiere. Requiere clave SSH reversa (tablet → servidor) configurada.
 
 ### 4. Base de datos
 La webapp y los scripts crean el esquema automáticamente
