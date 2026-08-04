@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}OBD Telemetry{% endblock %}</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+</head>
+<body>
+    <nav>
+        <a href="/" class="nav-brand" style="text-decoration:none;">🚗 OBD<span>Telemetry</span></a>
+        <button class="nav-toggle" id="nav-toggle" aria-label="Menú">☰</button>
+        <div class="nav-links" id="nav-links">
+            <a href="/" {% if request.path == '/' %}class="active"{% endif %}>Dashboard</a>
+            <a href="/trips" {% if 'trips' in request.path %}class="active"{% endif %}>Viajes</a>
+            <a href="/alerts" {% if 'alerts' in request.path %}class="active"{% endif %}>Alertas</a>
+            <a href="/map" {% if 'map' in request.path %}class="active"{% endif %}>Mapa</a>
+            <a href="/refuels" {% if 'refuels' in request.path %}class="active"{% endif %}>Repostajes</a>
+            <a href="/maintenance" {% if 'maintenance' in request.path %}class="active"{% endif %}>Consejos</a>
+        </div>
+        <div class="nav-status" id="nav-status">● Desconectado</div>
+    </nav>
+    <main>
+        {% block content %}{% endblock %}
+    </main>
+    <script>
+        // Menú hamburguesa (móvil)
+        document.getElementById('nav-toggle').addEventListener('click', () => {
+            document.getElementById('nav-links').classList.toggle('open');
+        });
+
+        // Connection status indicator in nav
+        setInterval(async () => {
+            try {
+                const r = await fetch('/api/status');
+                const d = await r.json();
+                const el = document.getElementById('nav-status');
+                if (d.connected) {
+                    el.textContent = `● ${d.speed || 0} km/h`;
+                    el.className = 'nav-status online';
+                } else {
+                    el.textContent = '● Sin datos';
+                    el.className = 'nav-status';
+                }
+            } catch(e) {
+                document.getElementById('nav-status').textContent = '● Error';
+            }
+        }, 5000);
+    </script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

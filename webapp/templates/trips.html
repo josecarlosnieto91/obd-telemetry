@@ -1,0 +1,133 @@
+{% extends "base.html" %}
+{% block title %}Viajes — OBD Telemetry{% endblock %}
+
+{% block content %}
+<div class="page">
+    <h1>Historial de Viajes</h1>
+    <div id="trips-list">
+        <p class="muted">Cargando viajes...</p>
+    </div>
+</div>
+
+<!-- Trip detail modal -->
+<div id="trip-modal" class="modal" style="display:none">
+    <div class="modal-content">
+        <span class="close" onclick="closeModal()">&times;</span>
+        <div id="trip-detail">Cargando...</div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function loadTrips() {
+    const r = await fetch('/api/trips');
+    const trips = await r.json();
+    const el = document.getElementById('trips-list');
+
+    if (trips.length === 0) {
+        el.innerHTML = '<p class="muted">Aún no hay viajes registrados. Conecta el VgateBridge y comienza a conducir.</p>';
+        return;
+    }
+
+    let html = '<table><thead><tr><th>Inicio</th><th>Duración</th><th>Distancia</th><th>Vel. max</th><th>Vel. med</th><th>RPM max</th><th>Estado</th><th>Mapa</th></tr></thead><tbody>';
+    for (const t of trips) {
+        const start = t.start_time ? new Date(t.start_time).toLocaleString('es') : '—';
+        const dur = t.driving_minutes ? `${t.driving_minutes} min` : '—';
+        const dist = t.distance_km ? `${t.distance_km.toFixed(1)} km` : '—';
+        const maxSpd = t.max_speed ? `${t.max_speed.toFixed(0)} km/h` : '—';
+        const avgSpd = t.avg_speed ? `${t.avg_speed.toFixed(0)} km/h` : '—';
+        const maxRpm = t.max_rpm ? `${t.max_rpm.toFixed(0)} rpm` : '—';
+        const status = t.status === 'active' ? '🟢 Activo' : '✅ Completado';
+        html += `<tr onclick="showTrip(${t.id})" style="cursor:pointer">
+            <td>${start}</td><td>${dur}</td><td>${dist}</td>
+            <td>${maxSpd}</td><td>${avgSpd}</td><td>${maxRpm}</td>
+            <td>${status}</td>
+            <td><a href="/map?session_id=${t.id}" onclick="event.stopPropagation()" title="Ver trazado en el mapa">🗺️</a></td>
+        </tr>`;
+    }
+    html += '</tbody></table>';
+    el.innerHTML = html;
+}
+
+async function showTrip(id) {
+    const r = await fetch(`/api/trip/${id}`);
+    const d = await r.json();
+    const el = document.getElementById('trip-detail');
+    const t = d.trip;
+
+    const start = t.start_time ? new Date(t.start_time).toLocaleString('es') : '—';
+    const end = t.end_time ? new Date(t.end_time).toLocaleString('es') : '—';
+    const dur = t.driving_minutes ? `${t.driving_minutes} min` : '—';
+    const dist = t.distance_km ? `${t.distance_km.toFixed(2)} km` : '?';
+
+    let html = `<h2>Viaje del ${start}</h2>
+        <div class="stats-grid mini">
+            <div class="stat-card"><div class="stat-label">Distancia</div><div class="stat-value">${dist}</div></div>
+            <div class="stat-card"><div class="stat-label">Duración</div><div class="stat-value">${dur}</div></div>
+            <div class="stat-card"><div class="stat-label">Vel. max</div><div class="stat-value">${t.max_speed?.toFixed(0) || '?'} km/h</div></div>
+            <div class="stat-card"><div class="stat-label">RPM max</div><div class="stat-value">${t.max_rpm?.toFixed(0) || '?'}</div></div>
+        </div>`;
+
+    // Speed chart for this trip
+    if (d.readings && d.readings.length > 0) {
+        html += '<canvas id="tripChart" height="150"></canvas>';
+    }
+
+    // Tips for this trip
+    if (d.tips && d.tips.length > 0) {
+        html += '<h3>💡 Consejos del viaje</h3><ul>';
+        for (const tip of d.tips) {
+            const icon = tip.severity === 'warning' ? '⚠️' : tip.severity === 'info' ? 'ℹ️' : '💡';
+            html += `<li>${icon} ${tip.message}</li>`;
+        }
+        html += '</ul>';
+    }
+
+    // DTCs
+    if (d.dtcs && d.dtcs.length > 0) {
+        html += '<h3>🔧 Códigos de error</h3><ul>';
+        for (const dtc of d.dtcs) {
+            html += `<li><strong>${dtc.code}</strong>: ${dtc.description || 'Sin descripción'}</li>`;
+        }
+        html += '</ul>';
+    }
+
+    el.innerHTML = html;
+    document.getElementById('trip-modal').style.display = 'flex';
+
+    // Draw chart
+    if (d.readings && d.readings.length > 1) {
+        setTimeout(() => {
+            const cctx = document.getElementById('tripChart')?.getContext('2d');
+            if (!cctx) return;
+            new Chart(cctx, {
+                type: 'line',
+                data: {
+                    labels: d.readings.map((_, i) => i),
+                    datasets: [
+                        { label: 'Velocidad', data: d.readings.map(r => r.speed || 0), borderColor: '#00ff88', fill: true, backgroundColor: 'rgba(0,255,136,0.1)', tension: 0.3 },
+                        { label: 'Temp. °C', data: d.readings.map(r => r.coolant_temp || 0), borderColor: '#ff6633', borderDash: [5,5], fill: false, tension: 0.3, yAxisID: 'y1' },
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    plugins: { legend: { labels: { color: '#ccc' } } },
+                    scales: {
+                        x: { ticks: { color: '#888', maxTicksLimit: 10 }, grid: { color: '#222' } },
+                        y: { ticks: { color: '#888' }, grid: { color: '#222' }, min: 0 },
+                        y1: { position: 'right', ticks: { color: '#f63' }, grid: { display: false } }
+                    }
+                }
+            });
+        }, 100);
+    }
+}
+
+function closeModal() {
+    document.getElementById('trip-modal').style.display = 'none';
+}
+
+loadTrips();
+</script>
+{% endblock %}

@@ -1,0 +1,262 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — OBD Telemetry{% endblock %}
+
+{% block content %}
+<div class="dashboard">
+    <h1>Dashboard del Vehículo</h1>
+
+    <!-- Stats cards -->
+    <div class="stats-grid">
+        <div class="stat-card" id="stat-rpm">
+            <div class="stat-label">RPM</div>
+            <div class="stat-value">—</div>
+            <div class="stat-unit">rpm</div>
+        </div>
+        <div class="stat-card" id="stat-speed">
+            <div class="stat-label">Velocidad</div>
+            <div class="stat-value">—</div>
+            <div class="stat-unit">km/h</div>
+        </div>
+        <div class="stat-card" id="stat-temp">
+            <div class="stat-label">Refrigerante</div>
+            <div class="stat-value">—</div>
+            <div class="stat-unit">°C</div>
+        </div>
+        <div class="stat-card" id="stat-voltage">
+            <div class="stat-label">Batería</div>
+            <div class="stat-value">—</div>
+            <div class="stat-unit">V</div>
+        </div>
+        <div class="stat-card" id="stat-fuel">
+            <div class="stat-label">Combustible</div>
+            <div class="stat-value">—</div>
+            <div class="stat-unit">%</div>
+        </div>
+        <div class="stat-card" id="stat-load">
+            <div class="stat-label">Carga Motor</div>
+            <div class="stat-value">—</div>
+            <div class="stat-unit">%</div>
+        </div>
+        <div class="stat-card" id="stat-map">
+            <div class="stat-label">Boost (MAP)</div>
+            <div class="stat-value">—</div>
+            <div class="stat-unit">kPa</div>
+        </div>
+    </div>
+
+    <!-- Speed chart -->
+    <div class="card">
+        <h2>Velocidad y RPM (último trayecto)</h2>
+        <div class="chart-wrap"><canvas id="speedChart"></canvas></div>
+    </div>
+
+    <!-- Car status: odómetro, mantenimiento, diagnósticos -->
+    <div class="card" id="car-status-card">
+        <h2>🚗 Estado del coche</h2>
+        <div id="car-status-container">
+            <p class="muted">Cargando...</p>
+        </div>
+    </div>
+
+    <!-- Alert summary -->
+    <div class="card" id="alert-summary">
+        <h2>Alertas activas</h2>
+        <div id="alerts-container">
+            <p class="muted">No hay alertas críticas</p>
+        </div>
+    </div>
+
+    <!-- DTCs activos -->
+    <div class="card" id="dtc-summary">
+        <h2>🔧 Códigos de error (DTC)</h2>
+        <div id="dtcs-container">
+            <p class="muted">Sin códigos registrados</p>
+        </div>
+    </div>
+
+    <!-- Overall stats -->
+    <div class="card">
+        <h2>Resumen histórico</h2>
+        <div id="stats-container" class="mini-stats">
+            <p class="muted">Cargando...</p>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// ── Gauges update ─────────────────────────────────────────
+const gauges = {
+    rpm: document.querySelector('#stat-rpm .stat-value'),
+    speed: document.querySelector('#stat-speed .stat-value'),
+    temp: document.querySelector('#stat-temp .stat-value'),
+    voltage: document.querySelector('#stat-voltage .stat-value'),
+    fuel: document.querySelector('#stat-fuel .stat-value'),
+    load: document.querySelector('#stat-load .stat-value'),
+    map: document.querySelector('#stat-map .stat-value'),
+};
+
+// ── Chart setup ───────────────────────────────────────────
+const ctx = document.getElementById('speedChart').getContext('2d');
+const chart = new Chart(ctx, {
+    type: 'line',
+    data: {
+        labels: [],
+        datasets: [
+            { label: 'Velocidad', data: [], borderColor: '#00ff88', backgroundColor: 'rgba(0,255,136,0.1)', fill: true, tension: 0.3, yAxisID: 'y' },
+            { label: 'RPM/100', data: [], borderColor: '#ffaa00', backgroundColor: 'rgba(255,170,0,0.05)', fill: false, tension: 0.3, yAxisID: 'y', borderDash: [5,5] },
+        ]
+    },
+    options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: { duration: 300 },
+        plugins: { legend: { labels: { color: '#ccc' } } },
+        scales: {
+            x: { ticks: { color: '#888', maxTicksLimit: 6 }, grid: { color: '#222' } },
+            y: { ticks: { color: '#888' }, grid: { color: '#222' }, min: 0 },
+        }
+    }
+});
+
+// ── Update loop ───────────────────────────────────────────
+async function update() {
+    try {
+        // Status
+        const r = await fetch('/api/status');
+        const d = await r.json();
+
+        if (d.connected) {
+            // RPM y velocidad: si no hay lectura (null), mostrar 0 (coche parado)
+            gauges.rpm.textContent = (d.rpm ?? 0).toLocaleString('es');
+            gauges.speed.textContent = d.speed ?? 0;
+            // Resto: último valor registrado, o — si nunca hubo
+            gauges.temp.textContent = d.coolant_temp ?? '—';
+            gauges.voltage.textContent = d.voltage ?? '—';
+            gauges.fuel.textContent = d.fuel_level ?? '—';
+            gauges.load.textContent = d.engine_load ?? '—';
+            gauges.map.textContent = d.map ?? '—';
+
+            // Color indicators
+            document.querySelector('#stat-temp').className = 'stat-card' + (d.coolant_temp > 95 ? ' danger' : d.coolant_temp > 85 ? ' warn' : '');
+            document.querySelector('#stat-voltage').className = 'stat-card' + (d.voltage < 12 ? ' danger' : d.voltage < 12.5 ? ' warn' : '');
+            document.querySelector('#stat-fuel').className = 'stat-card' + (d.fuel_level !== null && d.fuel_level < 15 ? ' warn' : '');
+
+            // Alert count
+            if (d.alert_count > 0) {
+                document.querySelector('#alerts-container').innerHTML =
+                    `<p class="alert-badge">⚠️ ${d.alert_count} alerta(s) sin revisar</p>
+                     <a href="/alerts" class="btn">Ver alertas</a>`;
+            }
+
+            // DTCs activos
+            const dtcBox = document.getElementById('dtcs-container');
+            if (d.dtcs && d.dtcs.length > 0) {
+                const dtcList = d.dtcs.map(x =>
+                    `<li><strong>${x.code}</strong>: ${x.description || 'Sin descripción'}</li>`
+                ).join('');
+                dtcBox.innerHTML =
+                    `<ul class="dtc-list">${dtcList}</ul>
+                     <p class="muted" style="margin-top:8px;">Detalle completo en el historial de viajes.</p>`;
+                document.getElementById('dtc-summary').className = 'card danger';
+            } else {
+                dtcBox.innerHTML = '<p class="muted">Sin códigos registrados</p>';
+                document.getElementById('dtc-summary').className = 'card';
+            }
+        }
+
+        // Latest readings for chart — último trayecto completo (no un corte temporal)
+        const rr = await fetch('/api/latest_readings/60?last_trip=1');
+        const readings = await rr.json();
+
+        chart.data.labels = readings.map(r => {
+            const t = r.timestamp.split('T')[1] || r.timestamp;
+            return t ? t.substring(0, 8) : '';
+        });
+        chart.data.datasets[0].data = readings.map(r => r.speed ?? 0);
+        chart.data.datasets[1].data = readings.map(r => (r.rpm ?? 0) / 100);
+        chart.update('none');
+
+    } catch(e) {
+        console.error('Update error:', e);
+    }
+}
+
+// ── Car status ─────────────────────────────────────────────
+const DIAG_ICONS = {ok: '✅', warn: '⚠️', critical: '🚨', nodata: '—'};
+async function loadCarStatus() {
+    try {
+        const r = await fetch('/api/car_status');
+        const d = await r.json();
+        const diag = d.diagnostics;
+        const items = [
+            ['Batería', diag.battery],
+            ['Termostato', diag.thermostat],
+            ['Turbo', diag.turbo],
+            ['Ralentí', diag.idle],
+        ].map(([name, x]) =>
+            `<div class="mini-stat"><span class="ms-label">${name}</span><span class="ms-value" style="font-size:0.85em;">${DIAG_ICONS[x.status]} ${x.label}</span></div>`
+        ).join('');
+
+        // Próximo mantenimiento (el ítem con mayor % sin vencer)
+        const maint = d.maintenance || [];
+        const sorted = maint.slice().sort((a, b) => b.pct - a.pct);
+        const next = sorted[0];
+        let maintHTML = '<p class="muted">Sin mantenimiento programado.</p>';
+        if (next && next.pct > 0) {
+            const overdue = next.overdue ? ' ⚠️ vencido' : '';
+            maintHTML = `<div style="margin-top:6px;">
+                <span>${next.icon} ${next.name}: <b>${next.pct.toFixed(0)}%</b>${overdue}</span>
+                <div style="background:#222;border-radius:5px;height:8px;margin-top:4px;">
+                    <div style="width:${Math.min(100, next.pct)}%;height:8px;background:${next.pct > 90 ? '#e74c3c' : next.pct > 60 ? '#f39c12' : '#2ecc71'};border-radius:5px;"></div>
+                </div>
+                <a href="/maintenance" class="btn" style="margin-top:6px;display:inline-block;">Ver mantenimiento</a>
+            </div>`;
+        }
+
+        document.getElementById('car-status-container').innerHTML = `
+            <div class="mini-stats" style="margin-bottom:8px;">
+                <div class="mini-stat"><span class="ms-label">Odómetro</span><span class="ms-value">${Math.round(d.odometer_km).toLocaleString('es')} km</span></div>
+                ${itvHTML(d.itv)}
+                ${items}
+            </div>
+            <h3 style="font-size:0.95em;margin:10px 0 4px;">Mantenimiento programado</h3>
+            ${maintHTML}`;
+    } catch(e) {
+        document.getElementById('car-status-container').innerHTML = '<p class="muted">Error cargando estado.</p>';
+    }
+}
+
+function itvHTML(itv) {
+    if (!itv) return '';
+    const icon = itv.days_left === null ? '🛂' : itv.days_left < 60 ? '🛂 ⚠️' : '🛂';
+    const label = itv.days_left === null ? 'Vence ' + itv.valid_until
+                : itv.days_left < 0 ? `vencida hace ${-itv.days_left} días`
+                : itv.days_left < 60 ? `${itv.days_left} días` : `vence en ${itv.days_left} días`;
+    return `<div class="mini-stat"><span class="ms-label">ITV</span><span class="ms-value" style="font-size:0.85em;">${icon} ${label}</span></div>`;
+}
+
+// ── Stats ─────────────────────────────────────────────────
+async function loadStats() {
+    try {
+        const r = await fetch('/api/stats');
+        const d = await r.json();
+        document.getElementById('stats-container').innerHTML = `
+            <div class="mini-stat"><span class="ms-label">Viajes</span><span class="ms-value">${d.total_trips}</span></div>
+            <div class="mini-stat"><span class="ms-label">KM totales</span><span class="ms-value">${d.total_km}</span></div>
+            <div class="mini-stat"><span class="ms-label">Horas</span><span class="ms-value">${d.total_hours}</span></div>
+            <div class="mini-stat"><span class="ms-label">Vel. máxima</span><span class="ms-value">${d.max_speed} km/h</span></div>
+            <div class="mini-stat"><span class="ms-label">Esta semana</span><span class="ms-value">${d.week_km} km</span></div>
+            <div class="mini-stat"><span class="ms-label">Alertas semana</span><span class="ms-value">${d.week_alerts}</span></div>
+        `;
+    } catch(e) {}
+}
+
+loadStats();
+loadCarStatus();
+update();
+setInterval(update, 5000);
+setInterval(loadCarStatus, 60000);
+</script>
+{% endblock %}

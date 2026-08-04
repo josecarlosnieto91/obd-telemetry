@@ -1,0 +1,67 @@
+{
+    "vehicle": {
+        "make": "Citroën",
+        "model": "C4 Grand Picasso I",
+        "year": 2006,
+        "engine": "DW10BTED4",
+        "description": "2.0 HDi 138 CV, common-rail, turbo VGT",
+        "fuel_type": "diesel",
+        "fuel_density_g_l": 832.0,
+        "fuel_price_product": "Gasoleo A",
+        "has_turbo": true,
+        "has_dpf": true,
+        "tank_capacity_l": 60.0,
+        "odometer_reference_km": 0,
+        "odometer_reference_ts": "",
+        "itv": {
+            "last_date": "YYYY-MM-DD",
+            "valid_until": "YYYY-MM-DD",
+            "last_km": 0,
+            "status": "favorable"
+        },
+        "ignored_dtcs": {
+            "P1351": "Código fantasma documentado en HDi PSA (circuito precalentamiento sin avería real)."
+        },
+        "notes": "Configuración de ejemplo — rellenar con los datos reales del vehículo"
+    },
+    "thresholds": {
+        "coolant_warn_c": 95,
+        "coolant_critical_c": 105,
+        "voltage_warn_v": 12.0,
+        "voltage_critical_v": 11.5,
+        "voltage_alt_warn_v": 14.8,
+        "rpm_idle_min": 700,
+        "rpm_idle_max": 950,
+        "rpm_redline": 4500,
+        "maf_idle_min_gs": 3.0,
+        "maf_idle_max_gs": 7.0,
+        "maf_cruise_warn_gs": 40.0,
+        "speed_fast_kmh": 120,
+        "fuel_warn_pct": 15,
+        "refuel_min_jump_pct": 8.0,
+        "battery_ok_v": 12.4,
+        "battery_warn_v": 12.0,
+        "thermostat_min_c": 75.0,
+        "idle_rpm_stddev_max": 100.0
+    },
+    "maintenance": [
+        {"id": "oil", "name": "Cambio de aceite", "icon": "🛢️", "interval_km": 15000, "interval_days": 365},
+        {"id": "timing_belt", "name": "Correa de distribución", "icon": "⛓️", "interval_km": 150000, "interval_days": 2920},
+        {"id": "fuel_filter", "name": "Filtro de combustible", "icon": "⛽", "interval_km": 30000, "interval_days": 730},
+        {"id": "air_filter", "name": "Filtro de aire", "icon": "🌬️", "interval_km": 30000, "interval_days": 730},
+        {"id": "brake_fluid", "name": "Líquido de frenos", "icon": "🛑", "interval_km": 0, "interval_days": 730},
+        {"id": "fap_additive", "name": "Aditivo FAP", "icon": "🌀", "interval_km": 120000, "interval_days": 3650}
+    ],
+    "dtc_descriptions": {
+        "P0401": "EGR caudal insuficiente (obstrucción)",
+        "P2002": "FAP eficiencia por debajo del umbral",
+        "P2003": "FAP eficiencia por debajo del umbral (banco 1)",
+        "P0087": "Presión de raíl demasiado baja",
+        "P0088": "Presión de raíl demasiado alta",
+        "P0093": "Fuga en circuito de combustible (alta presión)",
+        "P0234": "Turbo sobrepresión",
+        "P0299": "Turbo baja presión",
+        "P2015": "EGR posición sensor (PSA)",
+        "P1351": "Circuito de precalentamiento (bujías/relé)"
+    }
+}

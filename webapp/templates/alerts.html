@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}Alertas — OBD Telemetry{% endblock %}
+
+{% block content %}
+<div class="page">
+    <h1>Alertas del Vehículo</h1>
+    <div class="filter-bar">
+        <button onclick="filterAlerts('all')" class="btn active" id="f-all">Todas</button>
+        <button onclick="filterAlerts('critical')" class="btn" id="f-critical">Críticas</button>
+        <button onclick="filterAlerts('warning')" class="btn" id="f-warning">Advertencias</button>
+        <button onclick="filterAlerts('info')" class="btn" id="f-info">Información</button>
+    </div>
+    <div id="alerts-list">
+        <p class="muted">Cargando alertas...</p>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let allAlerts = [];
+
+async function loadAlerts() {
+    const r = await fetch('/api/alerts');
+    allAlerts = await r.json();
+    renderAlerts('all');
+}
+
+function renderAlerts(filter) {
+    const el = document.getElementById('alerts-list');
+    const filtered = filter === 'all' ? allAlerts : allAlerts.filter(a => a.severity === filter);
+
+    if (filtered.length === 0) {
+        el.innerHTML = '<p class="muted">No hay alertas registradas.</p>';
+        return;
+    }
+
+    let html = '';
+    for (const a of filtered) {
+        const ts = a.timestamp ? new Date(a.timestamp).toLocaleString('es') : '—';
+        const icon = a.severity === 'critical' ? '🔴' : a.severity === 'warning' ? '🟡' : '💡';
+        const sevLabel = a.severity === 'critical' ? 'Crítica' : a.severity === 'warning' ? 'Advertencia' : 'Info';
+        const catLabel = a.category === 'conduccion' ? 'Conducción' : a.category === 'mantenimiento' ? 'Mantenimiento' : a.category === 'uso' ? 'Uso' : a.category === 'temp' ? 'Temperatura' : a.category === 'battery' ? 'Batería' : a.category === 'rpm' ? 'RPM' : a.category === 'fuel' ? 'Combustible' : a.category === 'dtc' ? 'DTC' : a.category;
+
+        html += `<div class="alert-card severity-${a.severity}">
+            <div class="alert-icon">${icon}</div>
+            <div class="alert-body">
+                <div class="alert-header">
+                    <span class="alert-category">${catLabel}</span>
+                    <span class="alert-severity">${sevLabel}</span>
+                    <span class="alert-time">${ts}</span>
+                </div>
+                <div class="alert-message">${a.message}</div>
+            </div>
+            ${a.acknowledged ? '' : `<button class="btn-ack" onclick="acknowledge(${a.id})">✓</button>`}
+        </div>`;
+    }
+    el.innerHTML = html;
+}
+
+function filterAlerts(sev) {
+    document.querySelectorAll('.filter-bar .btn').forEach(b => b.classList.remove('active'));
+    document.getElementById('f-' + sev).classList.add('active');
+    renderAlerts(sev);
+}
+
+async function acknowledge(id) {
+    await fetch('/api/alerts/acknowledge', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({id})
+    });
+    // Update local state
+    const alert = allAlerts.find(a => a.id === id);
+    if (alert) alert.acknowledged = 1;
+    renderAlerts(document.querySelector('.filter-bar .active')?.id?.replace('f-', '') || 'all');
+}
+
+loadAlerts();
+</script>
+{% endblock %}

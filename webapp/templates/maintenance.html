@@ -1,0 +1,245 @@
+{% extends "base.html" %}
+{% block title %}Consejos — OBD Telemetry{% endblock %}
+
+{% block content %}
+<div class="page">
+    <h1>🔧 Consejos de Mantenimiento y Conducción</h1>
+    <p class="subtitle">Recomendaciones generadas automáticamente según los datos recogidos.
+        <a href="/alerts" style="color: var(--accent);">Histórico completo →</a></p>
+
+    <div class="tips-grid">
+        <div class="card">
+            <h2>🛣️ Conducción eficiente</h2>
+            <ul id="tips-driving">
+                <li class="muted">Datos insuficientes. Realiza más viajes para obtener recomendaciones.</li>
+            </ul>
+        </div>
+        <div class="card">
+            <h2>🔧 Mantenimiento</h2>
+            <ul id="tips-maintenance">
+                <li class="muted">Sin incidencias registradas.</li>
+            </ul>
+        </div>
+        <div class="card">
+            <h2>📋 Uso del vehículo</h2>
+            <ul id="tips-usage">
+                <li class="muted">Sin recomendaciones aún.</li>
+            </ul>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>🌀 Regeneración FAP</h2>
+        <div id="fap-container">
+            <p class="muted">Sin eventos registrados. Se detectan cuando el ralentí sube de forma sostenida (regeneración activa del filtro de partículas).</p>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>📐 Calibración aprendida</h2>
+        <div id="cal-container">
+            <p class="muted">Aprendiendo valores normales del vehículo con datos reales...</p>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>📊 Referencia de parámetros</h2>
+        <table>
+            <thead><tr><th>Parámetro</th><th>Normal</th><th>Precaución</th><th>Crítico</th></tr></thead>
+            <tbody>
+                <tr><td>Temperatura refrigerante</td><td>80-95°C</td><td>95-105°C</td><td>&gt;105°C</td></tr>
+                <tr><td>Tensión batería (motor apagado)</td><td>12.4-12.7V</td><td>12.0-12.4V</td><td>&lt;12.0V</td></tr>
+                <tr><td>Tensión alternador (motor encendido)</td><td>13.5-14.5V</td><td>14.5-15.0V</td><td>&gt;15.0V o &lt;13.0V</td></tr>
+                <tr><td>RPM ralentí (motor caliente)</td><td>700-900</td><td>900-1100</td><td>&gt;1100 o inestable</td></tr>
+                <tr><td>Carga motor (crucero)</td><td>20-40%</td><td>40-60%</td><td>&gt;60% sostenido</td></tr>
+                <tr><td>Combustible</td><td>&gt;25%</td><td>15-25%</td><td>&lt;15%</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <div class="card">
+        <h2>📅 Mantenimiento programado</h2>
+        <p class="subtitle">Kilómetros desde el último servicio frente al intervalo recomendado.
+            Pulsa <b>Registrar</b> cuando hayas hecho el cambio para reiniciar el contador.</p>
+        <div id="maint-container">
+            <p class="muted">Cargando...</p>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Consejo descartable: marca acknowledged=1 en BD (sigue en el histórico /alerts)
+async function dismissTip(id, li) {
+    try {
+        await fetch('/api/alerts/acknowledge', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({id})
+        });
+        li.style.opacity = '0.3';
+        li.style.textDecoration = 'line-through';
+        li.querySelector('.tip-dismiss').style.display = 'none';
+    } catch(e) { console.error('dismiss fail', e); }
+}
+
+function tipHTML(a) {
+    const icon = a.severity === 'warning' ? '⚠️' : a.severity === 'info' ? 'ℹ️' : '💡';
+    const ts = a.timestamp ? new Date(a.timestamp).toLocaleDateString('es') : '';
+    return `<li id="tip-${a.id}">
+        <span style="display:flex; align-items:flex-start; gap:8px;">
+            <span>${icon} ${a.message}</span>
+            <button class="tip-dismiss" onclick="dismissTip(${a.id}, this.closest('li'))" title="Marcar como resuelto">✕</button>
+        </span>
+        <span class="muted" style="font-size:0.75em;">${ts}</span>
+    </li>`;
+}
+
+async function loadTips() {
+    const r = await fetch('/api/alerts?severity=info');
+    const alerts = await r.json();
+    // Solo no descartados
+    const active = alerts.filter(a => !a.acknowledged);
+
+    const driving = active.filter(a => a.category === 'conduccion');
+    const maintenance = active.filter(a => a.category === 'mantenimiento');
+    const usage = active.filter(a => a.category === 'uso');
+
+    // También warnings de mantenimiento no descartados
+    const r2 = await fetch('/api/alerts?severity=warning');
+    const warnings = (await r2.json()).filter(a => !a.acknowledged);
+    const maintWarnings = warnings.filter(a => a.category === 'mantenimiento');
+
+    if (driving.length > 0) {
+        document.getElementById('tips-driving').innerHTML = driving.slice(-10).reverse().map(tipHTML).join('');
+    }
+    if (maintenance.length > 0 || maintWarnings.length > 0) {
+        const all = [...maintWarnings, ...maintenance].slice(-10).reverse();
+        document.getElementById('tips-maintenance').innerHTML = all.map(tipHTML).join('');
+    }
+    if (usage.length > 0) {
+        document.getElementById('tips-usage').innerHTML = usage.slice(-10).reverse().map(tipHTML).join('');
+    }
+}
+
+loadTips();
+
+// ── FAP ──────────────────────────────────────────────────
+async function loadFap() {
+    try {
+        const r = await fetch('/api/fap');
+        const events = await r.json();
+        const el = document.getElementById('fap-container');
+        if (!events.length) return;
+        el.innerHTML = events.map(e => {
+            const start = new Date(e.start_ts).toLocaleString('es');
+            const dur = e.duration_min ? `${e.duration_min.toFixed(0)} min` : '?';
+            return `<div class="fap-event">
+                <span>🌀 Regeneración: ${start}</span>
+                <span class="muted">${dur} · ralentí medio ${e.rpm_avg?.toFixed(0) || '?'} rpm · MAF ${e.maf_avg?.toFixed(1) || '?'} g/s</span>
+            </div>`;
+        }).join('');
+    } catch(e) {}
+}
+
+// ── Calibración ──────────────────────────────────────────
+const CAL_LABELS = {
+    rpm_idle: 'Ralentí (RPM)',
+    rpm_cruise: 'Crucero (RPM)',
+    maf_idle: 'MAF ralentí (g/s)',
+    coolant_cruise: 'Temp. crucero (°C)',
+    voltage_run: 'Voltaje en marcha (V)',
+    voltage_stop: 'Voltaje parado (V)',
+};
+async function loadCalibration() {
+    try {
+        const r = await fetch('/api/calibration');
+        const cal = await r.json();
+        if (!cal.length) return;
+        const el = document.getElementById('cal-container');
+        el.innerHTML = '<div class="mini-stats">' + cal.map(c => {
+            const label = CAL_LABELS[c.key] || c.key;
+            const val = c.value?.toFixed ? c.value.toFixed(1) : c.value;
+            return `<div class="mini-stat"><span class="ms-label">${label}</span><span class="ms-value">${val}</span></div>`;
+        }).join('') + '</div>';
+    } catch(e) {}
+}
+
+// ── Mantenimiento programado ─────────────────────────────
+function maintBar(pct) {
+    const color = pct > 90 ? '#e74c3c' : pct > 60 ? '#f39c12' : '#2ecc71';
+    return `<div style="background:#222;border-radius:5px;height:8px;flex:1;min-width:80px;margin:0 10px;">
+        <div style="width:${Math.min(100, pct)}%;height:8px;background:${color};border-radius:5px;"></div>
+    </div>`;
+}
+
+function maintHTML(it) {
+    const pct = it.pct || 0;
+    const status = it.overdue ? `<span style="color:#e74c3c;">⚠️ vencido</span>`
+                 : pct > 90 ? `<span style="color:#f39c12;">casi</span>`
+                 : pct > 0 ? `<span style="color:#2ecc71;">ok</span>` : '';
+    const last = it.last_ts
+        ? ` · último ${new Date(it.last_ts).toLocaleDateString('es')}${it.km_done != null ? ` (${Math.round(it.km_done).toLocaleString('es')} km)` : ''}`
+        : ' · sin registrar aún';
+    return `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #222;">
+        <span style="width:170px;">${it.icon} ${it.name}</span>
+        ${maintBar(pct)}
+        <span style="width:70px;text-align:right;"><b>${pct.toFixed(0)}%</b> ${status}</span>
+        <button class="btn" onclick="registerService('${it.id}', this)" style="font-size:0.8em;">Registrar</button>
+        <span class="muted" style="font-size:0.75em;">${last}</span>
+    </div>`;
+}
+
+async function loadMaintenance() {
+    try {
+        const r = await fetch('/api/car_status');
+        const d = await r.json();
+        const el = document.getElementById('maint-container');
+        if (!d.maintenance || d.maintenance.length === 0) {
+            el.innerHTML = '<p class="muted">Sin mantenimiento programado.</p>';
+            return;
+        }
+        window.CURRENT_KM = d.odometer_km;
+        el.innerHTML = d.maintenance.map(maintHTML).join('')
+            + `<p class="muted" style="margin-top:10px;font-size:0.8em;">Odómetro actual: ${Math.round(d.odometer_km).toLocaleString('es')} km</p>`;
+    } catch(e) {
+        document.getElementById('maint-container').innerHTML = '<p class="muted">Error cargando mantenimiento.</p>';
+    }
+}
+
+async function registerService(id, btn) {
+    const msg = '¿Registrar este servicio?\n\nKm actual: ' + (typeof CURRENT_KM !== 'undefined' ? Math.round(CURRENT_KM).toLocaleString('es') : '?') +
+        '\n\nSi se hizo en el pasado (p.ej. cambio de aceite hace 5.000 km), escribe el km real del servicio. Si lo haces ahora, pulsa OK sin escribir nada.';
+    const v = prompt(msg);
+    if (v === null) return;
+    btn.disabled = true;
+    btn.textContent = '...';
+    let body = {maintenance_id: id};
+    const km = parseFloat(String(v).replace(',', '.'));
+    if (!isNaN(km) && km > 0) body.odometer_km = km;
+    try {
+        const r = await fetch('/api/services', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body)
+        });
+        const d = await r.json();
+        if (d.ok) {
+            btn.textContent = '✓';
+            loadMaintenance();
+        } else {
+            btn.textContent = 'Registrar';
+            alert('Error: ' + (d.error || 'desconocido'));
+        }
+    } catch(e) {
+        btn.textContent = 'Registrar';
+        alert('Error de red');
+    }
+}
+
+loadFap();
+loadCalibration();
+loadMaintenance();
+</script>
+{% endblock %}

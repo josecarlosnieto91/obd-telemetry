@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block title %}Repostajes — OBD Telemetry{% endblock %}
+
+{% block content %}
+<div class="page">
+    <h1>⛽ Historial de Repostajes</h1>
+    <p class="subtitle">Detectados automáticamente cuando el coche se detiene junto a una
+        gasolinera (OpenStreetMap). El precio es el de la estación más cercana ese día
+        (API del Ministerio). El C4 no expone el nivel de combustible por OBD, así que
+        los litros se confirman manualmente.</p>
+
+    <div class="card">
+        <h2>⛽ Repostajes detectados</h2>
+        <div id="refuels-container">
+            <p class="muted">Sin repostajes registrados todavía. Aparecerán cuando el vehículo
+                exponga el nivel de combustible (PID 0x2F) y se detecte el primer llenado.</p>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>📊 Resumen</h2>
+        <div id="refuels-summary">
+            <p class="muted">Sin datos suficientes.</p>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const CAPACITY = {{ capacity_l }};
+
+function fmtDate(ts) {
+    if (!ts) return '—';
+    const d = new Date(ts);
+    return d.toLocaleString('es-ES', {day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit'});
+}
+
+function refuelHTML(r) {
+    const full = r.full_tank ? ' ✅ Depósito lleno' : '';
+    const litros = r.liters ? `<b>${r.liters.toFixed(1)} L</b>${full}`
+                  : `<span class="muted">—</span> <button class="btn" style="font-size:0.75em;" onclick="setLiters(${r.id}, this)">Litros</button>`;
+    const cost = r.cost ? ` · 💶 <b>${r.cost.toFixed(2)} €</b>` : '';
+    const price = r.price_per_l ? ` · ${r.price_per_l.toFixed(3)} €/L` : '';
+    const station = r.station ? `<span class="muted" style="font-size:0.8em;"> — ${r.station}</span>` : '';
+    const src = r.source === 'gps' ? '📍' : '⛽';
+    return `<tr>
+        <td>${fmtDate(r.ts)} ${src}</td>
+        <td>${litros}</td>
+        <td>${price}${cost}</td>
+        <td>${station}</td>
+    </tr>`;
+}
+
+async function setLiters(id, btn) {
+    const v = prompt('Litros echados (aprox.):');
+    if (v === null || v === '') return;
+    const litros = parseFloat(v.replace(',', '.'));
+    if (isNaN(litros) || litros <= 0) { alert('Número inválido'); return; }
+    btn.disabled = true;
+    try {
+        const r = await fetch(`/api/refuels/${id}/liters`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({liters: litros})
+        });
+        const d = await r.json();
+        if (d.ok) { loadRefuels(); }
+        else { btn.disabled = false; alert('Error: ' + (d.error || 'desconocido')); }
+    } catch(e) { btn.disabled = false; alert('Error de red'); }
+}
+
+async function loadRefuels() {
+    try {
+        const res = await fetch('/api/refuels');
+        const data = await res.json();
+        const list = data.refuels || data;  // soporta formato antiguo/nuevo
+        const cont = document.getElementById('refuels-container');
+        const sum = document.getElementById('refuels-summary');
+
+        if (!list || list.length === 0) {
+            cont.innerHTML = '<p class="muted">Sin repostajes registrados todavía. Aparecerán cuando el coche se detenga junto a una gasolinera.</p>';
+            sum.innerHTML = '<p class="muted">Sin datos suficientes.</p>';
+            return;
+        }
+
+        cont.innerHTML = `<table>
+            <thead><tr><th>Fecha</th><th>Litros</th><th>Precio / Coste</th><th>Estación</th></tr></thead>
+            <tbody>${list.map(refuelHTML).join('')}</tbody>
+        </table>`;
+
+        const totalL = data.total_liters || list.reduce((a, r) => a + (r.liters || 0), 0);
+        const totalCost = data.total_cost || list.reduce((a, r) => a + (r.cost || 0), 0);
+        const last = list[0];
+        const conLitros = list.filter(r => r.liters).length;
+        sum.innerHTML = `<p>📍 <b>${list.length}</b> repostaje${list.length > 1 ? 's' : ''}${conLitros ? ` · <b>${totalL.toFixed(1)} L</b> confirmados` : ''}${totalCost ? ` · 💶 <b>${totalCost.toFixed(2)} €</b>` : ''} · último: ${fmtDate(last.ts)}${last.station ? ` en ${last.station}` : ''}</p>`;
+    } catch(e) {
+        document.getElementById('refuels-container').innerHTML = '<p class="muted">Error cargando repostajes.</p>';
+    }
+}
+
+loadRefuels();
+</script>
+{% endblock %}

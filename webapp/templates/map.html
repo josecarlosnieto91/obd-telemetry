@@ -1,0 +1,183 @@
+{% extends "base.html" %}
+{% block title %}Mapa — OBD Telemetry{% endblock %}
+
+{% block content %}
+<h1>🗺️ Mapa de posiciones</h1>
+<p class="subtitle">Ruta GPS por día o por viaje + tracks GPX del logger.</p>
+<div style="margin-bottom: 10px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center;">
+    <div>
+        <label for="date-picker"><b>📅 Día:</b></label>
+        <input type="date" id="date-picker" style="padding: 6px; border-radius: 6px; border: 1px solid #ccc; background: #fff; color: #000;">
+    </div>
+    <div>
+        <label for="trip-select"><b>🚗 Viaje:</b></label>
+        <select id="trip-select" style="padding: 6px; border-radius: 6px; border: 1px solid #ccc; max-width: 100%;">
+            <option value="">Todos (historial completo)</option>
+        </select>
+    </div>
+    <span id="trip-cons" style="font-size: 0.9em; color: #888;"></span>
+</div>
+<div id="map" style="height: 60vh; border-radius: 10px; border: 1px solid #ddd;"></div>
+<div id="map-info" style="margin-top: 10px; font-size: 0.9em; color: #888;"></div>
+{% endblock %}
+
+{% block scripts %}
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+let map;
+let currentLayer = null;
+let allTrips = [];
+
+// Leer ?date=YYYY-MM-DD o ?session_id=N de la URL
+function getParam(name) {
+    return new URLSearchParams(window.location.search).get(name);
+}
+
+async function loadTrips() {
+    const resp = await fetch('/api/trips');
+    allTrips = await resp.json();
+    populateTripSelect(document.getElementById('date-picker').value);
+}
+
+function tripLabel(t) {
+    const start = t.start_time ? t.start_time.slice(0, 16).replace('T', ' ') : '?';
+    const end = t.end_time ? t.end_time.slice(11, 16) : '…';
+    const km = t.distance_km ? ` (${t.distance_km.toFixed(0)} km)` : '';
+    const status = t.status === 'completed' ? '✅' : '🔵';
+    return `${status} ${start} → ${end}${km}`;
+}
+
+function populateTripSelect(filterDate) {
+    const sel = document.getElementById('trip-select');
+    const prev = sel.value;
+    sel.innerHTML = '<option value="">Todos (historial completo)</option>';
+    allTrips
+        .filter(t => !filterDate || (t.start_time && t.start_time.slice(0,10) === filterDate))
+        .forEach(t => {
+            const opt = document.createElement('option');
+            opt.value = t.id;
+            opt.textContent = tripLabel(t);
+            sel.appendChild(opt);
+        });
+    // Re-seleccionar si el viaje sigue en la lista
+    if (prev && [...sel.options].some(o => o.value === prev)) sel.value = prev;
+}
+
+async function renderMap(fit = false) {
+    const sid = document.getElementById('trip-select').value;
+    const date = document.getElementById('date-picker').value;
+    const params = new URLSearchParams();
+    if (sid) params.set('session_id', sid);
+    else if (date) params.set('date', date);
+    const qs = params.toString();
+    const url = qs ? `/api/map?${qs}` : '/api/map';
+    const resp = await fetch(url);
+    const data = await resp.json();
+    const info = document.getElementById('map-info');
+    const cons = document.getElementById('trip-cons');
+
+    if (currentLayer) { map.removeLayer(currentLayer); }
+    const layers = [];
+
+    if (!data.positions.length && !data.tracks.length) {
+        info.textContent = '⚠️ Sin datos para esta selección.';
+        map.setView([43.38, -5.81], 12);
+        return;
+    }
+
+    const bounds = [];
+
+    // Tracks GPX (rutas completas del logger)
+    data.tracks.forEach(t => {
+        const pts = t.points.map(p => [p[0], p[1]]);
+        pts.forEach(p => bounds.push(p));
+        layers.push(L.polyline(pts, { color: '#2196F3', weight: 4, opacity: 0.7 }));
+    });
+
+    // Posiciones del recolector
+    const posPts = data.positions.map(p => [p.lat, p.lon]);
+    posPts.forEach(p => bounds.push(p));
+    if (posPts.length >= 2) {
+        layers.push(L.polyline(posPts, { color: '#FF5722', weight: 3, dashArray: '6,4' }));
+    }
+
+    // Última posición: marcador con detalle
+    if (data.positions.length) {
+        const last = data.positions[data.positions.length - 1];
+        const speed = last.gps_speed ? `${last.gps_speed.toFixed(0)} km/h` : '? km/h';
+        layers.push(L.marker([last.lat, last.lon]).bindPopup(
+            `<b>Última posición</b><br>🕐 ${last.timestamp}<br>🚗 ${speed}`));
+    }
+
+    currentLayer = L.layerGroup(layers).addTo(map);
+
+    // Zoom encuadrando el tramo (solo al cambiar selección o primera carga)
+    if (fit && bounds.length) {
+        // Si hay un viaje concreto seleccionado, encuadrar SOLO la línea roja
+        // (positions de esa sesión), no los tracks GPX de otros días.
+        if (sid && posPts.length >= 2) {
+            map.fitBounds(L.latLngBounds(posPts), { padding: [50, 50] });
+        } else {
+            map.fitBounds(bounds, { padding: [40, 40] });
+        }
+    }
+
+    let txt = `📍 ${data.positions.length} posiciones · 🛣️ ${data.tracks.length} tracks`;
+    if (sid) {
+        const opt = document.getElementById('trip-select').selectedOptions[0];
+        txt = `Viaje ${sid}: ${opt ? opt.textContent : ''}`;
+    } else if (date) {
+        txt = `📅 ${date}: ${data.positions.length} posiciones`;
+    }
+    info.textContent = txt;
+
+    // Consumo del viaje seleccionado
+    cons.textContent = '';
+    if (sid) {
+        const t = allTrips.find(x => x.id === Number(sid));
+        if (t && t.consumo_l100) cons.textContent = `⛽ ${t.consumo_l100} l/100km`;
+    }
+}
+
+(async () => {
+    map = L.map('map');
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    await loadTrips();
+
+    // Pre-selección desde URL (?session_id=N o ?date=YYYY-MM-DD)
+    const urlSid = getParam('session_id');
+    const urlDate = getParam('date');
+    if (urlDate) {
+        document.getElementById('date-picker').value = urlDate;
+        populateTripSelect(urlDate);
+    }
+    if (urlSid) {
+        document.getElementById('trip-select').value = urlSid;
+    }
+
+    await renderMap(true);  // primera carga: encuadrar
+
+    document.getElementById('date-picker').addEventListener('change', (e) => {
+        const d = e.target.value;
+        document.getElementById('trip-select').value = '';
+        populateTripSelect(d || '');
+        renderMap(true);
+    });
+    document.getElementById('trip-select').addEventListener('change', () => {
+        const sel = document.getElementById('trip-select').value;
+        if (sel) {
+            const t = allTrips.find(x => x.id === Number(sel));
+            if (t && t.start_time) document.getElementById('date-picker').value = t.start_time.slice(0,10);
+        }
+        renderMap(true);
+    });
+
+    // Auto-refresh: recarga capas SIN re-encuadrar (no pisa el zoom del usuario)
+    setInterval(() => renderMap(false), 30000);
+})();
+</script>
+{% endblock %}
