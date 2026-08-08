@@ -34,6 +34,19 @@ def _fuel_density():
         return 832.0
 
 
+def _maf_cruise_warn():
+    """Umbral MAF de carga media alta (g/s) según thresholds del config.
+
+    ⚠️ FIX 2026-08-08: antes hardcodeado a 25.0 g/s — genérico y mal calibrado
+    para un diésel 2.0 (crucero 120 km/h = 25-35 g/s, disparaba alerta falsa).
+    El config del C4 define maf_cruise_warn_gs=40.0; fallback 40.0."""
+    try:
+        with open(CONFIG_PATH) as fh:
+            return float(json.load(fh).get("thresholds", {}).get("maf_cruise_warn_gs", 40.0))
+    except Exception:
+        return 40.0
+
+
 DENSITY_FUEL = _fuel_density()  # g/L — usado en el cálculo de consumo MAF
 
 
@@ -66,7 +79,7 @@ def reverse_geocode(lat, lon):
             "zoom": 12, "accept-language": "es",
         })
         req = urllib.request.Request(url, headers={
-            "User-Agent": "VehicleTelemetry/1.0 (personal vehicle tracker)",
+            "User-Agent": "PolarStar-Telemetry/1.0 (personal vehicle tracker; josecarlos.nieto@gmail.com)",
         })
         with urllib.request.urlopen(req, timeout=6) as r:
             data = json.loads(r.read().decode())
@@ -131,7 +144,7 @@ def generate_tips(conn, c, session_id, readings, dist, dur_min):
     if avg_rpm and avg_rpm < 1500 and avg_speed and avg_speed > 60:
         tips.append(("conduccion", "info",
             "Conducción eficiente: RPM bajos a velocidad de crucero. Buen estilo."))
-    if avg_maf and avg_maf > 25.0:
+    if avg_maf and avg_maf > _maf_cruise_warn():
         tips.append(("conduccion", "info",
             f"Carga media del motor alta (MAF {avg_maf:.1f} g/s). Revisar presión "
             "de neumáticos y exceso de peso en el vehículo."))
