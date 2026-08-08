@@ -202,20 +202,20 @@ def get_diagnostics(conn):
     except Exception as e:
         sys.stderr.write(f"battery diag fail: {e}\n")
 
-    # ── Termostato: en viajes >20 km, la temp debe superar el mínimo
-    thermostat = {"status": "nodata", "label": "—", "detail": "Necesita un viaje de >20 km", "value": None}
+    # ── Termostato: en viajes > thermostat_trip_km, la temp debe superar el mínimo
+    thermostat = {"status": "nodata", "label": "—", "detail": f"Necesita un viaje de >{thr.get('thermostat_trip_km', 20):.0f} km", "value": None}
     try:
         c.execute("""
             SELECT s.id, s.distance_km,
                    MAX(r.coolant_temp) AS max_temp, MAX(r.speed) AS max_speed
             FROM sessions s JOIN readings r ON r.session_id = s.id
-            WHERE s.status='completed' AND s.distance_km >= 20
+            WHERE s.status='completed' AND s.distance_km >= ?
             GROUP BY s.id ORDER BY s.end_time DESC LIMIT 5
-        """)
+        """, (thr.get("thermostat_trip_km", 20),))
         trips = [dict(row) for row in c.fetchall()]
         if trips:
-            # Usar el viaje más reciente con max_speed > 60 (crucero real)
-            real = next((t for t in trips if (t["max_speed"] or 0) > 60), trips[0])
+            # Usar el viaje más reciente con max_speed > speed_econ_kmh (crucero real)
+            real = next((t for t in trips if (t["max_speed"] or 0) > thr.get("speed_econ_kmh", 60)), trips[0])
             mt = real["max_temp"]
             if mt is not None and mt < thr.get("thermostat_min_c", 75.0):
                 thermostat = {"status": "warn", "label": "Sospecha", "detail": f"Temp máx {mt:.0f}°C en viaje de {real['distance_km']:.0f} km (termostato puede estar abierto)", "value": round(mt, 1)}
@@ -224,7 +224,7 @@ def get_diagnostics(conn):
     except Exception as e:
         sys.stderr.write(f"thermostat diag fail: {e}\n")
 
-    # ── Turbo: MAP en crucero (speed > 80) — tendencia a la baja = VGT débil
+    # ── Turbo: MAP en crucero (speed > speed_cruise_kmh) — tendencia a la baja = VGT débil
     # Portabilidad 2026-08-05: solo si vehicle.has_turbo (un atmosférico no
     # tiene MAP de sobrealimentación → el check sería ruido).
     turbo = {"status": "nodata", "label": "—", "detail": "Sin datos MAP suficientes", "value": None}
@@ -232,12 +232,12 @@ def get_diagnostics(conn):
         try:
             c.execute("""
                 SELECT AVG(map) AS avg_map, COUNT(*) AS n
-                FROM readings WHERE map IS NOT NULL AND speed > 80
-            """)
+                FROM readings WHERE map IS NOT NULL AND speed > ?
+            """, (thr.get("speed_cruise_kmh", 80),))
             r = c.fetchone()
             if r and r["n"] and r["n"] >= 5 and r["avg_map"]:
                 avg = r["avg_map"]
-                if avg < 90:
+                if avg < thr.get("map_cruise_min_kpa", 90):
                     turbo = {"status": "warn", "label": "Bajo", "detail": f"MAP medio en crucero {avg:.0f} kPa (posible VGT/turbo débil)", "value": round(avg, 1)}
                 else:
                     turbo = {"status": "ok", "label": "OK", "detail": f"MAP medio en crucero {avg:.0f} kPa", "value": round(avg, 1)}
@@ -249,10 +249,10 @@ def get_diagnostics(conn):
     try:
         c.execute("""
             SELECT rpm FROM readings
-            WHERE speed < 2 AND coolant_temp >= 70 AND rpm IS NOT NULL
+            WHERE speed < 2 AND coolant_temp >= ? AND rpm IS NOT NULL
               AND rpm BETWEEN 500 AND 2000
             ORDER BY timestamp DESC LIMIT 30
-        """)
+        """, (thr.get("coolant_idle_sample_c", 70),))
         rpms = [row["rpm"] for row in c.fetchall()]
         if len(rpms) >= 5:
             mean = sum(rpms) / len(rpms)
@@ -294,6 +294,8 @@ def check_and_alert():
     conn = get_db()
     c = conn.cursor()
     _ensure_tables(c)
+    cfg = load_config()
+    thr = cfg.get("thresholds", {})
     diag = get_diagnostics(conn)
     new_alerts = []
 
@@ -321,9 +323,9 @@ def check_and_alert():
                              f"📅 {it['icon']} {it['name']}: intervalo superado ({it['pct']:.0f}%)"):
                 new_alerts.append(f"📅 {it['icon']} {it['name']}: toca revisión")
 
-    # ITV próxima a vencer (< 60 días) — aviso único
+    # ITV próxima a vencer (< itv_notify_days) — aviso único
     itv = get_itv()
-    if itv and itv["days_left"] is not None and itv["days_left"] < 60:
+    if itv and itv["days_left"] is not None and itv["days_left"] < thr.get("itv_notify_days", 60):
         if _insert_alert(c, conn, "itv", "warning",
                          f"🛂 ITV vence en {itv['days_left']} días ({itv['valid_until']}). "
                          f"Última: {itv['last_date']} a los {itv['last_km']} km — favorable."):

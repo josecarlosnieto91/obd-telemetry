@@ -47,6 +47,17 @@ def _maf_cruise_warn():
         return 40.0
 
 
+def _threshold(key, fallback):
+    """Lee un umbral numérico del config (thresholds.<key>); fallback si falta.
+    Parametrización 2026-08-08: los consejos de viaje ya no llevan valores
+    hardcodeados (antes: 3000 rpm, 120 km/h, 100 °C, 5000 rpm)."""
+    try:
+        with open(CONFIG_PATH) as fh:
+            return float(json.load(fh).get("thresholds", {}).get(key, fallback))
+    except Exception:
+        return fallback
+
+
 DENSITY_FUEL = _fuel_density()  # g/L — usado en el cálculo de consumo MAF
 
 
@@ -137,38 +148,38 @@ def generate_tips(conn, c, session_id, readings, dist, dur_min):
     tips = []
 
     # Conducción eficiente
-    if avg_rpm and avg_rpm > 3000:
+    if avg_rpm and avg_rpm > _threshold("rpm_high_warn", 3000):
         tips.append(("conduccion", "info",
             f"RPM medios altos ({avg_rpm:.0f} rpm). Para ahorrar combustible, "
             "cambia a una marcha superior cuando el motor supere las 2500 rpm."))
-    if avg_rpm and avg_rpm < 1500 and avg_speed and avg_speed > 60:
+    if avg_rpm and avg_rpm < _threshold("rpm_low_econ", 1500) and avg_speed and avg_speed > _threshold("speed_econ_kmh", 60):
         tips.append(("conduccion", "info",
             "Conducción eficiente: RPM bajos a velocidad de crucero. Buen estilo."))
     if avg_maf and avg_maf > _maf_cruise_warn():
         tips.append(("conduccion", "info",
             f"Carga media del motor alta (MAF {avg_maf:.1f} g/s). Revisar presión "
             "de neumáticos y exceso de peso en el vehículo."))
-    if max_speed and max_speed > 120:
+    if max_speed and max_speed > _threshold("speed_fast_kmh", 120):
         tips.append(("conduccion", "warning",
             f"Velocidad máxima de {max_speed:.0f} km/h registrada. Circular a "
             "altas velocidades incrementa el consumo y el desgaste."))
 
     # Mantenimiento
-    if max_temp and max_temp > 100:
+    if max_temp and max_temp > _threshold("coolant_trip_warn_c", 100):
         tips.append(("mantenimiento", "warning",
             f"Temperatura refrigerante alta ({max_temp:.0f}°C). Revisar nivel "
             "de refrigerante y funcionamiento del termostato/ventilador."))
-    if max_rpm and max_rpm > 5000:
+    if max_rpm and max_rpm > _threshold("rpm_max_warn", 5000):
         tips.append(("mantenimiento", "info",
             f"RPM máximo de {max_rpm:.0f} rpm. Si es frecuente, revisar estado "
             "del aceite y niveles."))
 
     # Uso del vehículo
-    if dur_min and dur_min < 10 and dist < 5:
+    if dur_min and dur_min < _threshold("trip_short_min", 10) and dist < _threshold("trip_short_km", 5):
         tips.append(("uso", "info",
             f"Trayecto corto ({dur_min} min). Los motores necesitan trayectos "
             "más largos para alcanzar temperatura óptima."))
-    if dist and dist > 150:
+    if dist and dist > _threshold("trip_long_km", 150):
         tips.append(("uso", "info",
             f"Viaje largo ({dist:.0f} km). Descansa cada 2 horas y revisa "
             "presión de neumáticos antes de salir."))

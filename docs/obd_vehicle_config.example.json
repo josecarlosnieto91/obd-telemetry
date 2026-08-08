@@ -1,67 +1,139 @@
 {
-    "vehicle": {
-        "make": "Citroën",
-        "model": "C4 Grand Picasso I",
-        "year": 2006,
-        "engine": "DW10BTED4",
-        "description": "2.0 HDi 138 CV, common-rail, turbo VGT",
-        "fuel_type": "diesel",
-        "fuel_density_g_l": 832.0,
-        "fuel_price_product": "Gasoleo A",
-        "has_turbo": true,
-        "has_dpf": true,
-        "tank_capacity_l": 60.0,
-        "odometer_reference_km": 0,
-        "odometer_reference_ts": "",
-        "itv": {
-            "last_date": "YYYY-MM-DD",
-            "valid_until": "YYYY-MM-DD",
-            "last_km": 0,
-            "status": "favorable"
-        },
-        "ignored_dtcs": {
-            "P1351": "Código fantasma documentado en HDi PSA (circuito precalentamiento sin avería real)."
-        },
-        "notes": "Configuración de ejemplo — rellenar con los datos reales del vehículo"
+  "vehicle": {
+    "make": "Citroën",
+    "model": "C4 Grand Picasso I",
+    "year": 2006,
+    "engine": "DW10BTED4",
+    "description": "2.0 HDi 138 CV, common-rail, turbo VGT",
+    "fuel": "diesel",
+    "tank_capacity_l": 60.0,
+    "odometer_reference_km": 0,
+    "odometer_reference_ts": "YYYY-MM-DDTHH:MM:SS",
+    "itv": {
+      "last_date": "YYYY-MM-DD",
+      "valid_until": "YYYY-MM-DD",
+      "last_km": 0
     },
-    "thresholds": {
-        "coolant_warn_c": 95,
-        "coolant_critical_c": 105,
-        "voltage_warn_v": 12.0,
-        "voltage_critical_v": 11.5,
-        "voltage_alt_warn_v": 14.8,
-        "rpm_idle_min": 700,
-        "rpm_idle_max": 950,
-        "rpm_redline": 4500,
-        "maf_idle_min_gs": 3.0,
-        "maf_idle_max_gs": 7.0,
-        "maf_cruise_warn_gs": 40.0,
-        "speed_fast_kmh": 120,
-        "fuel_warn_pct": 15,
-        "refuel_min_jump_pct": 8.0,
-        "battery_ok_v": 12.4,
-        "battery_warn_v": 12.0,
-        "thermostat_min_c": 75.0,
-        "idle_rpm_stddev_max": 100.0
+    "ignored_dtcs": {
+      "P1351": "Código fantasma documentado en HDi PSA (circuito precalentamiento sin avería real). Verificado bujías OK. Se ignora por decisión del usuario 2026-08-04."
     },
-    "maintenance": [
-        {"id": "oil", "name": "Cambio de aceite", "icon": "🛢️", "interval_km": 15000, "interval_days": 365},
-        {"id": "timing_belt", "name": "Correa de distribución", "icon": "⛓️", "interval_km": 150000, "interval_days": 2920},
-        {"id": "fuel_filter", "name": "Filtro de combustible", "icon": "⛽", "interval_km": 30000, "interval_days": 730},
-        {"id": "air_filter", "name": "Filtro de aire", "icon": "🌬️", "interval_km": 30000, "interval_days": 730},
-        {"id": "brake_fluid", "name": "Líquido de frenos", "icon": "🛑", "interval_km": 0, "interval_days": 730},
-        {"id": "fap_additive", "name": "Aditivo FAP", "icon": "🌀", "interval_km": 120000, "interval_days": 3650}
-    ],
-    "dtc_descriptions": {
-        "P0401": "EGR caudal insuficiente (obstrucción)",
-        "P2002": "FAP eficiencia por debajo del umbral",
-        "P2003": "FAP eficiencia por debajo del umbral (banco 1)",
-        "P0087": "Presión de raíl demasiado baja",
-        "P0088": "Presión de raíl demasiado alta",
-        "P0093": "Fuga en circuito de combustible (alta presión)",
-        "P0234": "Turbo sobrepresión",
-        "P0299": "Turbo baja presión",
-        "P2015": "EGR posición sensor (PSA)",
-        "P1351": "Circuito de precalentamiento (bujías/relé)"
+    "notes": "Puntos débiles: EGR (obstrucción), FAP/DPF (trayectos cortos), inyectores, bomba alta presión, turbo VGT, correa distribución 150k km/8 años",
+    "fuel_type": "diesel",
+    "fuel_density_g_l": 832.0,
+    "fuel_price_product": "Gasoleo A",
+    "has_turbo": true,
+    "has_dpf": true
+  },
+  "thresholds": {
+    "coolant_warn_c": 95,
+    "coolant_critical_c": 105,
+    "voltage_warn_v": 12.0,
+    "voltage_critical_v": 11.5,
+    "voltage_alt_warn_v": 14.8,
+    "rpm_idle_min": 700,
+    "rpm_idle_max": 950,
+    "rpm_redline": 4500,
+    "maf_idle_min_gs": 3.0,
+    "maf_idle_max_gs": 7.0,
+    "maf_cruise_warn_gs": 40.0,
+    "speed_fast_kmh": 120,
+    "fuel_warn_pct": 15,
+    "refuel_min_jump_pct": 8.0,
+    "battery_ok_v": 12.4,
+    "battery_warn_v": 12.0,
+    "thermostat_min_c": 75.0,
+    "idle_rpm_stddev_max": 100.0,
+    "rpm_high_warn": 3000,
+    "rpm_low_econ": 1500,
+    "speed_econ_kmh": 60,
+    "coolant_trip_warn_c": 100,
+    "rpm_max_warn": 5000,
+    "speed_cruise_kmh": 80,
+    "map_cruise_min_kpa": 90,
+    "coolant_idle_sample_c": 70,
+    "itv_notify_days": 60,
+    "thermostat_trip_km": 20,
+    "trip_short_min": 10,
+    "trip_short_km": 5,
+    "trip_long_km": 150
+  },
+  "maintenance": [
+    {
+      "id": "oil",
+      "name": "Cambio de aceite",
+      "icon": "🛢️",
+      "interval_km": 15000,
+      "interval_days": 365
+    },
+    {
+      "id": "timing_belt",
+      "name": "Correa distribución",
+      "icon": "⛓️",
+      "interval_km": 150000,
+      "interval_days": 2920
+    },
+    {
+      "id": "fuel_filter",
+      "name": "Filtro de gasoil",
+      "icon": "⛽",
+      "interval_km": 30000,
+      "interval_days": 730
+    },
+    {
+      "id": "air_filter",
+      "name": "Filtro de aire",
+      "icon": "💨",
+      "interval_km": 30000,
+      "interval_days": 730
+    },
+    {
+      "id": "brake_fluid",
+      "name": "Líquido de frenos",
+      "icon": "🛑",
+      "interval_days": 730
+    },
+    {
+      "id": "fap_additive",
+      "name": "Aditivo FAP (Eolys)",
+      "icon": "🌀",
+      "interval_km": 120000,
+      "interval_days": 3650
     }
+  ],
+  "dtc_descriptions": {
+    "P0087": "Presión de raíl de combustible demasiado baja (inyección common-rail)",
+    "P0088": "Presión de raíl de combustible demasiado alta",
+    "P0093": "Fuga en el sistema de combustible",
+    "P0101": "Sensor MAF (caudal de aire): rango/rendimiento fuera de lo normal",
+    "P0102": "Sensor MAF: señal baja",
+    "P0103": "Sensor MAF: señal alta",
+    "P0113": "Sensor temperatura admisión: señal alta",
+    "P0234": "Turbo: sobrepresión (overboost)",
+    "P0299": "Turbo: presión insuficiente (underboost, fuga o VGT obstruido)",
+    "P0401": "EGR: flujo insuficiente (obstrucción típica en uso urbano)",
+    "P1351": "Circuito de precalentamiento (bujías incandescentes, relé o cableado). Muy común en HDi: en muchos casos aparece sin avería física real; comprobar resistencia de bujías (~0,5-2 Ω) y relé",
+    "P0402": "EGR: flujo excesivo",
+    "P0403": "EGR: fallo en el circuito de control",
+    "P0409": "EGR: fallo sensor de posición",
+    "P0420": "Catalizador: eficiencia por debajo del umbral",
+    "P0480": "Ventilador de refrigeración: fallo de circuito",
+    "P0500": "Sensor de velocidad del vehículo: fallo",
+    "P0562": "Tensión del sistema baja",
+    "P0563": "Tensión del sistema alta",
+    "P0670": "Bujías de precalentamiento: fallo de circuito",
+    "P0671": "Bujía de precalentamiento cilindro 1: fallo",
+    "P0672": "Bujía de precalentamiento cilindro 2: fallo",
+    "P0673": "Bujía de precalentamiento cilindro 3: fallo",
+    "P0674": "Bujía de precalentamiento cilindro 4: fallo",
+    "P2002": "FAP/DPF: eficiencia por debajo del umbral (partículas acumuladas)",
+    "P2003": "FAP/DPF: obstruido, regeneración necesaria",
+    "P2015": "Sensor de posición de la válvula EGR: fuera de rango (típico PSA)",
+    "P2016": "Sensor de posición de la válvula EGR: señal baja",
+    "P2017": "Sensor de posición de la válvula EGR: señal alta",
+    "P2452": "Sensor de presión diferencial FAP: fallo",
+    "P2453": "Sensor de presión diferencial FAP: rango/rendimiento",
+    "P2454": "Sensor de presión diferencial FAP: señal baja",
+    "P2455": "Sensor de presión diferencial FAP: señal alta",
+    "P11AA": "Presión de raíl: fuga o inyector defectuoso (código PSA)"
+  }
 }
