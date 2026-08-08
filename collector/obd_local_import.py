@@ -111,7 +111,7 @@ def get_or_create_active_session(conn, start_ts, first_new_ts=None):
     return cur.lastrowid
 
 
-def import_readings(conn, local_conn, session_id):
+def import_readings(conn, local_conn, session_id, ts_min=None, ts_max=None):
     try:
         # Columnas diésel (map/ambient/fuel_pressure) pueden no existir en
         # ficheros antiguos → consulta dinámica según PRAGMA del fichero local
@@ -125,6 +125,13 @@ def import_readings(conn, local_conn, session_id):
         return 0  # tabla readings no existe en el fichero antiguo
     if not rows:
         return 0
+    # Filtrar por bloque temporal (si se pasa: ts_min/ts_max de este viaje)
+    if ts_min is not None or ts_max is not None:
+        lo = ts_min or ""
+        hi = ts_max or "~~~~~"  # > cualquier ISO timestamp
+        rows = [r for r in rows if lo <= r[0] <= hi]
+        if not rows:
+            return 0
     # Timestamps ya presentes en destino (rango aproximado del fichero local)
     min_ts = rows[0][0]
     max_ts = rows[-1][0]
@@ -148,7 +155,7 @@ def import_readings(conn, local_conn, session_id):
     return inserted
 
 
-def import_positions(conn, local_conn, session_id):
+def import_positions(conn, local_conn, session_id, ts_min=None, ts_max=None):
     try:
         rows = local_conn.execute(
             "SELECT timestamp, lat, lon, speed, bearing, accuracy, alt, provider "
@@ -157,6 +164,12 @@ def import_positions(conn, local_conn, session_id):
         return 0  # tabla positions no existe en el fichero antiguo
     if not rows:
         return 0
+    if ts_min is not None or ts_max is not None:
+        lo = ts_min or ""
+        hi = ts_max or "~~~~~"
+        rows = [r for r in rows if lo <= r[0] <= hi]
+        if not rows:
+            return 0
     min_ts = rows[0][0]
     max_ts = rows[-1][0]
     existing = set(r[0] for r in conn.execute(
@@ -173,6 +186,50 @@ def import_positions(conn, local_conn, session_id):
         existing.add(ts)
         inserted += 1
     return inserted
+
+
+def split_into_blocks(local_conn, after_ts, gap_minutes=SESSION_GAP_MINUTES):
+    """Divide las lecturas NUEVAS del fichero local en bloques de viaje.
+
+    El fichero local acumula todo el historial de la tablet. Si entre dos
+    lecturas consecutivas hay un hueco > gap_minutes (coche apagado), es un
+    viaje DISTINTO → bloque nuevo. Cada bloque generará su propia sesión.
+
+    Devuelve lista de (ts_min, ts_max). Vacía si no hay lecturas nuevas.
+    """
+    try:
+        if after_ts:
+            rows = local_conn.execute(
+                "SELECT timestamp FROM readings WHERE timestamp > ? ORDER BY timestamp",
+                (after_ts,)).fetchall()
+        else:
+            rows = local_conn.execute(
+                "SELECT timestamp FROM readings ORDER BY timestamp").fetchall()
+    except sqlite3.OperationalError:
+        return []
+    if not rows:
+        return []
+
+    blocks = []
+    cur_min = cur_max = None
+    prev = None
+    for (ts,) in rows:
+        if prev is not None:
+            try:
+                gap = (datetime.datetime.fromisoformat(ts)
+                       - datetime.datetime.fromisoformat(prev)).total_seconds() / 60.0
+            except Exception:
+                gap = 0.0
+            if gap > gap_minutes:
+                blocks.append((cur_min, cur_max))
+                cur_min = cur_max = None
+        if cur_min is None:
+            cur_min = ts
+        cur_max = ts
+        prev = ts
+    if cur_min is not None:
+        blocks.append((cur_min, cur_max))
+    return blocks
 
 
 def import_dtcs(conn, local_conn, session_id):
@@ -286,6 +343,7 @@ def main():
         # lectura (coche apagado entre medias = viaje nuevo, no continuación).
         start_ts = datetime.datetime.now().isoformat()
         first_new_ts = None
+        last_dest_ts = None
         try:
             # Último timestamp ya presente en destino (global).
             last_dest = target_conn.execute(
@@ -307,11 +365,37 @@ def main():
         except sqlite3.OperationalError:
             pass  # fichero sin tabla readings (solo dtc, caso borde)
 
-        session_id = get_or_create_active_session(target_conn, start_ts, first_new_ts)
+        # ⚠️ BUG FIX 2026-08-08: dividir las lecturas nuevas en bloques por
+        # hueco temporal. El fichero local puede contener varios viajes con
+        # el coche apagado entre medias (p.ej. 07/08 21:24-21:30 + 08/08
+        # 08:49-08:54 → 690 min de "viaje" falso). Cada bloque con gap >
+        # SESSION_GAP_MINUTES crea su PROPIA sesión, con start_time = primer
+        # dato del bloque (no el del día anterior).
+        blocks = split_into_blocks(local_conn, last_dest_ts)
+        if not blocks:
+            # Sin lecturas nuevas: sesión para dtc/fap/cal (o nada)
+            session_id = get_or_create_active_session(target_conn, start_ts, first_new_ts)
+            n_read = 0
+            n_pos = 0
+        else:
+            session_id = None
+            n_read = 0
+            n_pos = 0
+            for (bmin, bmax) in blocks:
+                if session_id is None:
+                    # Primer bloque: reutiliza la sesión activa si el hueco es
+                    # pequeño (viaje en curso) o crea una limpia.
+                    session_id = get_or_create_active_session(target_conn, bmin, bmin)
+                else:
+                    # Bloques siguientes: SIEMPRE sesión nueva (viaje distinto)
+                    cur = target_conn.execute(
+                        "INSERT INTO sessions (start_time, status) VALUES (?, 'active')",
+                        (bmin,))
+                    session_id = cur.lastrowid
+                n_read += import_readings(target_conn, local_conn, session_id, bmin, bmax)
+                n_pos += import_positions(target_conn, local_conn, session_id, bmin, bmax)
 
-        n_read = import_readings(target_conn, local_conn, session_id)
-        n_pos = import_positions(target_conn, local_conn, session_id)
-        n_dtc = import_dtcs(target_conn, local_conn, session_id)
+        n_dtc = import_dtcs(target_conn, local_conn, session_id or 0)
         n_fap = import_fap_events(target_conn, local_conn)
         n_cal = import_calibration(target_conn, local_conn)
         target_conn.commit()
