@@ -367,6 +367,44 @@ def api_refuel_liters(rid):
     return jsonify({"ok": True, "liters": round(litros, 1), "cost": cost, "price_per_l": price})
 
 
+@app.route("/api/refuels/manual", methods=["POST"])
+def api_refuel_manual():
+    """Crea un repostaje manual (el usuario lo introduce en la web).
+
+    Cuerpo JSON: {ts?, liters, price_per_l?, station?, full_tank?}
+    - ts: fecha ISO opcional (por defecto ahora)
+    - liters: obligatorio (> 0)
+    - price_per_l: opcional (€/L); si no, cost queda null
+    - cost: se calcula si hay price_per_l
+    """
+    data = request.get_json(silent=True) or {}
+    litros = data.get("liters")
+    if not litros or litros <= 0:
+        return jsonify({"error": "liters > 0 required"}), 400
+    ts = data.get("ts") or datetime.now().isoformat()
+    price = data.get("price_per_l")
+    try:
+        price = float(price) if price is not None else None
+    except (TypeError, ValueError):
+        price = None
+    cost = round(float(litros) * price, 2) if price else None
+    station = (data.get("station") or "").strip() or None
+    full_tank = 1 if data.get("full_tank") else 0
+    conn = get_db()
+    c = conn.cursor()
+    # ts único para el repostaje manual (no choca con detecciones GPS)
+    c.execute(
+        "INSERT INTO refuels (ts, liters, price_per_l, cost, station, full_tank, source) "
+        "VALUES (?, ?, ?, ?, ?, ?, 'manual')",
+        (ts, round(float(litros), 1), price, cost, station, full_tank),
+    )
+    conn.commit()
+    rid = c.lastrowid
+    conn.close()
+    return jsonify({"ok": True, "id": rid, "ts": ts, "liters": round(float(litros), 1),
+                    "cost": cost, "price_per_l": price, "station": station})
+
+
 @app.route("/api/car_status")
 def api_car_status():
     """Estado del coche: odómetro, ITV, mantenimiento programado y diagnósticos."""

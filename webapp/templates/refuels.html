@@ -10,10 +10,39 @@
         los litros se confirman manualmente.</p>
 
     <div class="card">
+        <h2>➕ Repostaje manual</h2>
+        <p class="subtitle" style="margin-top:0;">¿No lo ha detectado la web? Introdúcelo a mano (útil cuando no hay cobertura GPS en la gasolinera).</p>
+        <form id="manual-form" onsubmit="return submitManual(event)">
+            <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:end;">
+                <div>
+                    <label for="m-litros">Litros *</label><br>
+                    <input type="number" id="m-litros" step="0.1" min="0.1" placeholder="40.0" required>
+                </div>
+                <div>
+                    <label for="m-precio">Precio €/L</label><br>
+                    <input type="number" id="m-precio" step="0.001" min="0" placeholder="1.459">
+                </div>
+                <div>
+                    <label for="m-estacion">Estación</label><br>
+                    <input type="text" id="m-estacion" placeholder="Repsol Oviedo">
+                </div>
+                <div>
+                    <label for="m-fecha">Fecha</label><br>
+                    <input type="datetime-local" id="m-fecha">
+                </div>
+                <div>
+                    <label><input type="checkbox" id="m-full" style="width:auto;"> Depósito lleno</label>
+                </div>
+                <button type="submit" class="btn" style="background:#006600;color:#fff;">Guardar repostaje</button>
+            </div>
+            <div id="manual-msg" style="margin-top:8px;"></div>
+        </form>
+    </div>
+
+    <div class="card">
         <h2>⛽ Repostajes detectados</h2>
         <div id="refuels-container">
-            <p class="muted">Sin repostajes registrados todavía. Aparecerán cuando el vehículo
-                exponga el nivel de combustible (PID 0x2F) y se detecte el primer llenado.</p>
+            <p class="muted">Sin repostajes registrados todavía. Aparecerán cuando el coche se detenga junto a una gasolinera.</p>
         </div>
     </div>
 
@@ -68,6 +97,43 @@ async function setLiters(id, btn) {
         if (d.ok) { loadRefuels(); }
         else { btn.disabled = false; alert('Error: ' + (d.error || 'desconocido')); }
     } catch(e) { btn.disabled = false; alert('Error de red'); }
+}
+
+async function submitManual(ev) {
+    ev.preventDefault();
+    const msg = document.getElementById('manual-msg');
+    const litros = parseFloat(document.getElementById('m-litros').value.replace(',', '.'));
+    if (isNaN(litros) || litros <= 0) { msg.innerHTML = '<span style="color:#e74c3c;">Litros inválidos</span>'; return false; }
+    const precioRaw = document.getElementById('m-precio').value;
+    const precio = precioRaw ? parseFloat(precioRaw.replace(',', '.')) : null;
+    const estacion = document.getElementById('m-estacion').value.trim();
+    const fechaRaw = document.getElementById('m-fecha').value;
+    const full = document.getElementById('m-full').checked;
+    msg.innerHTML = '<span class="muted">Guardando…</span>';
+    try {
+        const r = await fetch('/api/refuels/manual', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                liters: litros,
+                price_per_l: precio,
+                station: estacion || null,
+                ts: fechaRaw ? new Date(fechaRaw).toISOString() : null,
+                full_tank: full
+            })
+        });
+        const d = await r.json();
+        if (d.ok) {
+            msg.innerHTML = '<span style="color:#2ecc71;">✅ Repostaje guardado</span>';
+            document.getElementById('manual-form').reset();
+            loadRefuels();
+        } else {
+            msg.innerHTML = '<span style="color:#e74c3c;">Error: ' + (d.error || 'desconocido') + '</span>';
+        }
+    } catch(e) {
+        msg.innerHTML = '<span style="color:#e74c3c;">Error de red</span>';
+    }
+    return false;
 }
 
 async function loadRefuels() {
