@@ -35,8 +35,8 @@ CASSIOPEIA = "user@server"          # MagicDNS — no IP hardcodeada
 INCOMING_PATH = "~/.hermes/data/incoming/polar_obd_local.db"
 SSH_KEY = os.path.join(HOME, ".ssh", "id_ed25519")
 
-INTERVAL = 60            # segundos entre ciclos
-SYNC_EVERY = 5            # sync cada N ciclos (~5 min)
+INTERVAL = 30            # segundos entre ciclos
+SYNC_EVERY = 20           # sync cada N ciclos (~10 min con INTERVAL=30)
 GPS_TIMEOUT = 8
 BRIDGE_TIMEOUT = 6
 

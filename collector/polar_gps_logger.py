@@ -19,7 +19,7 @@ STATE_DIR = os.path.join(HOME, ".track_state")
 LOG_FILE = os.path.join(STATE_DIR, "logger.log")
 STATE_FILE = os.path.join(STATE_DIR, "current.json")
 
-GPS_INTERVAL = 15          # seconds between GPS reads
+GPS_INTERVAL = 20          # seconds between GPS reads
 STOP_TIMEOUT = 900         # seconds stopped before ending track (15 min, coherente con trip_summary)
 JOIN_TIMEOUT_MIN = 15      # gap < 15 min desde la última posición → continuar MISMO track al arrancar
 MOVE_THRESHOLD = 20        # meters to consider "moving"
