@@ -15,8 +15,8 @@ from datetime import datetime
 OBD_DB = os.path.expanduser("~/.hermes/data/obd_telemetry.db")
 CTX_DB = os.path.expanduser("~/.hermes/data/context/context.db")
 CONFIG_PATH = os.path.expanduser("~/.hermes/scripts/obd_vehicle_config.json")
-IDLE_MINUTES = 5      # sin lecturas durante 5 min => bridge apagado, viaje terminado
-STOPPED_MINUTES = 10  # coche parado (speed < MIN_MOVING_SPEED) durante 10 min => viaje terminado
+IDLE_MINUTES = 15     # sin lecturas NUEVAS durante 15 min => bridge apagado, viaje terminado
+STOPPED_MINUTES = 15  # coche parado (speed < MIN_MOVING_SPEED) durante 15 min => viaje terminado
 MIN_MOVING_SPEED = 1.0   # km/h: por debajo, el coche está parado
 MIN_TRIP_KM = 0.5        # km mínimos para considerar viaje real (filtro deriva GPS)
 MIN_TRIP_MAX_SPEED = 5.0 # km/h: si nunca supera, no es viaje real (arranque parado)
