@@ -20,7 +20,8 @@ LOG_FILE = os.path.join(STATE_DIR, "logger.log")
 STATE_FILE = os.path.join(STATE_DIR, "current.json")
 
 GPS_INTERVAL = 15          # seconds between GPS reads
-STOP_TIMEOUT = 180         # seconds stopped before ending track (3 min)
+STOP_TIMEOUT = 900         # seconds stopped before ending track (15 min, coherente con trip_summary)
+JOIN_TIMEOUT_MIN = 15      # gap < 15 min desde la última posición → continuar MISMO track al arrancar
 MOVE_THRESHOLD = 20        # meters to consider "moving"
 CASSIOPEIA = "user@server"   # MagicDNS — no IP hardcodeada
 CASSIOPEIA_PATH = "~/.hermes/data/tracks"
@@ -74,7 +75,7 @@ def haversine(lat1, lon1, lat2, lon2):
 
 def gpx_header():
     return '''<?xml version="1.0" encoding="UTF-8"?>
-<gpx version="1.1" creator="vehicle-gps-logger" xmlns="http://www.topografix.com/GPX/1/1">
+<gpx version="1.1" creator="polar-star-logger" xmlns="http://www.topografix.com/GPX/1/1">
   <trk>
     <name>Track</name>
     <trkseg>
@@ -126,6 +127,7 @@ def load_state():
             "start_time": None,
             "last_lat": None,
             "last_lon": None,
+            "last_ts": None,
             "idle_seconds": 0,
             "current_file": None
         }
@@ -145,25 +147,50 @@ def main():
 
     # Resume or start fresh
     if state["tracking"] and state["current_file"] and os.path.exists(state["current_file"]):
-        # Previous session was interrupted (car turned off mid-track)
-        # Finalize the GPX and upload it, then start fresh
         gpx_file = state["current_file"]
         log(f"Track anterior detectado: {os.path.basename(gpx_file)} ({state['points']} puntos)")
-        with open(gpx_file, "a") as f:
-            f.write(gpx_footer())
-        log(f"🏁 Track finalizado (recuperado tras corte)")
-        sync_to_server(gpx_file)
-        # Reset completely
-        state = {
-            "tracking": False,
-            "points": 0,
-            "start_time": None,
-            "last_lat": None,
-            "last_lon": None,
-            "idle_seconds": 0,
-            "current_file": None
-        }
-        gpx_file = None
+
+        # ⚠️ FIX 2026-08-12: unión condicional. Antes SIEMPRE se finalizaba y se
+        # creaba track nuevo → viajes partidos por cortes de corriente breves
+        # (el usuario reportó tramos partidos). Ahora: si el gap desde la última
+        # posición es < JOIN_TIMEOUT_MIN (15 min, coherente con trip_summary),
+        # CONTINUAR el mismo archivo GPX (append) — no finalizar ni crear nuevo.
+        gap_min = None
+        last_ts = state.get("last_ts")
+        if last_ts:
+            try:
+                from datetime import datetime as _dt, timezone as _tz
+                last_dt = _dt.fromisoformat(last_ts.replace("Z", "+00:00"))
+                gap_min = (datetime.now(timezone.utc) - last_dt).total_seconds() / 60.0
+            except Exception:
+                gap_min = None
+
+        if gap_min is not None and gap_min < JOIN_TIMEOUT_MIN:
+            log(f"🔗 Gap {gap_min:.1f} min < {JOIN_TIMEOUT_MIN} — CONTINUANDO el mismo track "
+                f"(append, sin partir)")
+            # No finalizar: se sigue escribiendo en gpx_file tal cual.
+            # El archivo ya tiene header; los trkpt nuevos se añaden al final.
+            state["idle_seconds"] = 0
+            # last_lat/last_lon se conservan del estado → continuidad geográfica
+        else:
+            # Corte largo (gap >= 15 min): finalizar el track y empezar uno nuevo
+            if gap_min is not None:
+                log(f"Gap {gap_min:.1f} min >= {JOIN_TIMEOUT_MIN} — finalizando track anterior")
+            with open(gpx_file, "a") as f:
+                f.write(gpx_footer())
+            log(f"🏁 Track finalizado (recuperado tras corte): {os.path.basename(gpx_file)}")
+            sync_to_server(gpx_file)
+            state = {
+                "tracking": False,
+                "points": 0,
+                "start_time": None,
+                "last_lat": None,
+                "last_lon": None,
+                "last_ts": None,
+                "idle_seconds": 0,
+                "current_file": None
+            }
+            gpx_file = None
 
     while True:
         gps = get_gps()
@@ -205,6 +232,7 @@ def main():
             state["points"] += 1
             state["last_lat"] = lat
             state["last_lon"] = lon
+            state["last_ts"] = ts
             state["idle_seconds"] = 0
         else:
             state["idle_seconds"] += GPS_INTERVAL
