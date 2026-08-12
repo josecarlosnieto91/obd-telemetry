@@ -307,12 +307,25 @@ def get_gps():
     return None
 
 
-def read_bridge(with_dtcs=False, supported=None):
-    """Conecta al bridge local, lee PIDs base + diésel (si soportados) +
-    voltaje (+ DTCs si with_dtcs). supported = set de PIDs Mode 01 soportados.
-    Devuelve dict con 'reading' y opcionalmente 'dtcs', o None si falla."""
-    reading = {}
+# ── Estado de conexión del bridge (OPT 2026-08-12) ──
+# Antes, cada read_bridge() abría socket nuevo + init 6s + warm-up 12s → el
+# ciclo real tardaba ~40s de trabajo (gap ~71s con INTERVAL=30). Ahora el
+# socket se REUTILIZA entre ciclos; init+warm-up solo en la primera conexión
+# o tras un fallo. El protocolo ELM327 exige que tras el init el primer
+# comando dispare SEARCHING (warm-up) — eso sigue pasando en cada reconexión.
+_BRIDGE_SOCK = None
+_BRIDGE_INIT_DONE = False
+
+
+def _bridge_connect():
+    """(Re)conecta al bridge con init+warm-up completos. Devuelve socket o None."""
+    global _BRIDGE_SOCK, _BRIDGE_INIT_DONE
     try:
+        if _BRIDGE_SOCK is not None:
+            try:
+                _BRIDGE_SOCK.close()
+            except Exception:
+                pass
         sock = socket.create_connection((BRIDGE_HOST, BRIDGE_PORT), timeout=BRIDGE_TIMEOUT)
         # Ventana init del bridge: el ELM327 ejecuta ATE0/ATZ al conectar el
         # primer cliente y tarda ~5s. Si enviamos comandos antes, los rechaza
@@ -335,36 +348,85 @@ def read_bridge(with_dtcs=False, supported=None):
                 pass
         except Exception:
             pass
+        _BRIDGE_SOCK = sock
+        _BRIDGE_INIT_DONE = True
+        return sock
+    except Exception:
+        _BRIDGE_SOCK = None
+        _BRIDGE_INIT_DONE = False
+        return None
+
+
+def read_bridge(with_dtcs=False, supported=None):
+    """Lee PIDs del bridge. Reutiliza el socket si está vivo; reconecta
+    (init+warm-up) solo en la primera llamada o tras un fallo.
+
+    Devuelve dict con 'reading' y opcionalmente 'dtcs', o None si falla."""
+    global _BRIDGE_SOCK, _BRIDGE_INIT_DONE
+    reading = {}
+
+    # 1. Obtener socket: reutilizado, o reconectar si no hay/nunca init
+    sock = _BRIDGE_SOCK if _BRIDGE_INIT_DONE else None
+    if sock is None:
+        sock = _bridge_connect()
+        if sock is None:
+            return None
+
+    try:
+        # 2. Verificar que el socket sigue vivo con un comando barato.
+        #    ATRV (voltaje) responde rápido y no depende de PIDs.
+        probe = read_pid(sock, "ATRV", timeout=5)
+        voltage = parse_voltage(probe)
+        if voltage is not None:
+            reading["voltage"] = voltage
+        elif probe == b"":
+            # Socket muerto (bridge cerrado / BT caído): reconectar y reintentar
+            _BRIDGE_SOCK = None
+            _BRIDGE_INIT_DONE = False
+            sock = _bridge_connect()
+            if sock is None:
+                return None
+            probe = read_pid(sock, "ATRV", timeout=5)
+            voltage = parse_voltage(probe)
+            if voltage is not None:
+                reading["voltage"] = voltage
+
+        # 3. PIDs base (sin warm-up: el socket ya está sincronizado)
         for name, cmd in PIDS:
-            resp = read_pid(sock, cmd)
+            resp = read_pid(sock, cmd, timeout=5)
             value = parse_hex_response(resp)
             if value is not None:
                 reading[name] = value
-        # PIDs diésel: solo si el escaneo confirmó que el motor los expone
+
+        # 4. PIDs diésel: solo si el escaneo confirmó que el motor los expone
         if supported:
             for name, cmd in PIDS_DIESEL:
                 pid_code = cmd[2:]
                 if pid_code in supported:
-                    resp = read_pid(sock, cmd)
+                    resp = read_pid(sock, cmd, timeout=5)
                     value = parse_hex_response(resp)
                     if value is not None:
                         reading[name] = value
-        # Voltaje batería (ATRV responde con CR, no CRLF)
-        vresp = read_pid(sock, "ATRV")
-        voltage = parse_voltage(vresp)
-        if voltage is not None:
-            reading["voltage"] = voltage
-        # DTCs: solo en el ciclo de sync (Mode 03 + 07) — cuestan ~2-4s
+
+        # 5. DTCs: solo en el ciclo de sync (Mode 03 + 07) — cuestan ~2-4s
         dtcs = None
         if with_dtcs:
             stored, pending = read_dtcs(sock)
             dtcs = {"stored": stored, "pending": pending}
-        sock.close()
+
         result = {"reading": reading}
         if dtcs is not None:
             result["dtcs"] = dtcs
         return result if reading else None
     except Exception:
+        # Cualquier error: marcar el socket como inválido para reconectar luego
+        try:
+            if _BRIDGE_SOCK is not None:
+                _BRIDGE_SOCK.close()
+        except Exception:
+            pass
+        _BRIDGE_SOCK = None
+        _BRIDGE_INIT_DONE = False
         return None
 
 
