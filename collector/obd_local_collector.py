@@ -595,7 +595,28 @@ def main():
     log("Recolector OBD local iniciado (autónomo, sin Internet)")
 
     while True:
-        ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+        # ⚠️ FIX 2026-08-12: timestamp monótono. Si la tablet estuvo apagada
+        # varios días, el RTC puede resetearse (p.ej. fecha de marzo 2026) y
+        # time.strftime devolvería timestamps ANTERIORES al último guardado →
+        # lecturas con fecha falsa que el importador ignora (viaje perdido).
+        # Nunca retroceder: usar max(now, último timestamp local + 1s).
+        now = time.strftime("%Y-%m-%dT%H:%M:%S")
+        ts = now
+        try:
+            last_row = conn.execute(
+                "SELECT MAX(timestamp) FROM readings").fetchone()
+            if last_row and last_row[0]:
+                last_ts = last_row[0]
+                if last_ts > now:
+                    # Reloj reseteado: avanzar 1s desde el último guardado
+                    try:
+                        import datetime as _dtmod
+                        nxt = _dtmod.datetime.fromisoformat(last_ts)
+                        ts = (nxt + _dtmod.timedelta(seconds=1)).isoformat()
+                    except Exception:
+                        ts = now
+        except sqlite3.OperationalError:
+            pass
         # DTCs solo en el ciclo de sync (~5 min): cuestan tiempo extra en el bus
         with_dtcs = (counter % SYNC_EVERY == 0)
         # Escaneo de PIDs soportados: primer ciclo (si no hay datos previos)
