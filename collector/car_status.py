@@ -21,6 +21,11 @@ from datetime import datetime
 OBD_DB = os.path.expanduser("~/.hermes/data/obd_telemetry.db")
 CONFIG_PATH = os.path.expanduser("~/.hermes/scripts/obd_vehicle_config.json")
 
+# FIX 2026-08-18: outlier de ralentí. Lecturas de maniobra (speed<2 con
+# acelerador) pueden marcar 1200-1400 rpm; se descartan a ±100 rpm de la
+# mediana para medir solo el ralentí estable real.
+IDLE_OUTLIER_RPM = 100
+
 
 def load_config():
     try:
@@ -245,6 +250,11 @@ def get_diagnostics(conn):
             sys.stderr.write(f"turbo diag fail: {e}\n")
 
     # ── Ralentí: desviación estándar de RPM en idle (motor caliente)
+    # FIX 2026-08-18: filtro de outliers. Las lecturas de maniobra/aparcamiento
+    # (speed<2 pero acelerador pisado) meten picos de 1200-1400 rpm que inflan
+    # la desviación → falsos "posible inyectores/EGR". Ahora se calcula la
+    # MEDIANA y se descartan lecturas a más de ±50 rpm de ella antes de medir
+    # la dispersión real del ralentí estable.
     idle = {"status": "nodata", "label": "—", "detail": "Sin datos de ralentí suficientes", "value": None}
     try:
         c.execute("""
@@ -255,13 +265,21 @@ def get_diagnostics(conn):
         """, (thr.get("coolant_idle_sample_c", 70),))
         rpms = [row["rpm"] for row in c.fetchall()]
         if len(rpms) >= 5:
-            mean = sum(rpms) / len(rpms)
-            var = sum((x - mean) ** 2 for x in rpms) / len(rpms)
-            std = var ** 0.5
-            if std > thr.get("idle_rpm_stddev_max", 100.0):
-                idle = {"status": "warn", "label": "Inestable", "detail": f"Desviación ralentí {std:.0f} rpm (media {mean:.0f}) — posible inyectores/EGR", "value": round(std, 1)}
+            # Mediana como referencia robusta (no la media: la media se va con
+            # los picos de maniobra). Outlier = ±100 rpm de la mediana.
+            sorted_rpms = sorted(rpms)
+            median = sorted_rpms[len(sorted_rpms) // 2]
+            idle_only = [r for r in rpms if abs(r - median) <= IDLE_OUTLIER_RPM]
+            if len(idle_only) >= 5:
+                mean = sum(idle_only) / len(idle_only)
+                var = sum((x - mean) ** 2 for x in idle_only) / len(idle_only)
+                std = var ** 0.5
+                if std > thr.get("idle_rpm_stddev_max", 100.0):
+                    idle = {"status": "warn", "label": "Inestable", "detail": f"Desviación ralentí {std:.0f} rpm (media {mean:.0f}) — posible inyectores/EGR", "value": round(std, 1)}
+                else:
+                    idle = {"status": "ok", "label": "Estable", "detail": f"Desviación ralentí {std:.0f} rpm (media {mean:.0f})", "value": round(std, 1)}
             else:
-                idle = {"status": "ok", "label": "Estable", "detail": f"Desviación ralentí {std:.0f} rpm (media {mean:.0f})", "value": round(std, 1)}
+                idle = {"status": "nodata", "label": "—", "detail": "Ralentí estable: muestras insuficientes tras filtrar transitorios", "value": None}
     except Exception as e:
         sys.stderr.write(f"idle diag fail: {e}\n")
 
