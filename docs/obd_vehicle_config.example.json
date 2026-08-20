@@ -135,6 +135,8 @@
     "P2453": "Sensor de presión diferencial FAP: rango/rendimiento",
     "P2454": "Sensor de presión diferencial FAP: señal baja",
     "P2455": "Sensor de presión diferencial FAP: señal alta",
-    "P11AA": "Presión de raíl: fuga o inyector defectuoso (código PSA)"
+    "P11AA": "Presión de raíl: fuga o inyector defectuoso (código PSA)",
+    "P0213": "Inyector de arranque en frío 1: fallo de circuito (interpretación genérica; en HDi sin inyector de arranque separado, verificar cableado/inyectores con Diagbox)",
+    "C1114": "ABS: relé de alimentación en cortocircuito a masa (interpretación genérica; el C4 no tiene suspensión Hydractive — confirmar módulo con Diagbox)"
   }
 }

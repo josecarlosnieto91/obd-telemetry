@@ -158,7 +158,7 @@ async function update() {
                 ).join('');
                 dtcBox.innerHTML =
                     `<ul class="dtc-list">${dtcList}</ul>
-                     <p class="muted" style="margin-top:8px;">Detalle completo en el historial de viajes.</p>`;
+                     <p class="muted" style="margin-top:8px;"><a href="/trips">Detalle completo en el historial de viajes →</a></p>`;
                 document.getElementById('dtc-summary').className = 'card danger';
             } else {
                 dtcBox.innerHTML = '<p class="muted">Sin códigos registrados</p>';
