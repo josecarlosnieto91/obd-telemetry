@@ -288,20 +288,20 @@ def get_diagnostics(conn):
 
 # ── Alertas ────────────────────────────────────────────────
 
-def _insert_alert(c, conn, alert_type, severity, message):
+def _insert_alert(c, conn, category, severity, message):
     """Inserta alerta solo si no existe una del mismo tipo sin acknowledge."""
     c.execute(
-        "SELECT id FROM alerts WHERE category='diagnostico' AND message=? "
+        "SELECT id FROM alerts WHERE category=? AND message=? "
         "AND acknowledged=0 ORDER BY id DESC LIMIT 1",
-        (message,),
+        (category, message),
     )
     if c.fetchone():
         return False
     ts = datetime.now().isoformat()
     c.execute(
         "INSERT INTO alerts (session_id, timestamp, category, severity, message) "
-        "VALUES (NULL, ?, 'diagnostico', ?, ?)",
-        (ts, severity, message),
+        "VALUES (NULL, ?, ?, ?, ?)",
+        (ts, category, severity, message),
     )
     conn.commit()
     return True
@@ -334,12 +334,35 @@ def check_and_alert():
         if _insert_alert(c, conn, "idle", "warning", f"🔧 Ralentí: {diag['idle']['detail']}"):
             new_alerts.append(f"🔧 {diag['idle']['detail']}")
 
-    # Mantenimiento vencido (overdue) — aviso único por ítem
+    # Mantenimiento programado: vencido (>100%), próximo (>=90%) y sin registrar
+    # FIX 2026-08-21: antes solo avisaba de ítems registrados y vencidos, y usaba
+    # categorías maint_* que la webapp (category='mantenimiento') nunca mostraba.
+    # Ahora: categoría unificada 'mantenimiento' + aviso para ítems sin registrar
+    # cuyo intervalo ya se superó (el plan existe pero nunca se registró el servicio).
+    odometer = get_odometer(conn)
     for it in get_maintenance(conn):
+        name = f"{it.get('icon', '🛠️')} {it['name']}"
+        if it.get("last_km") is None:
+            # Sin registrar: si el odómetro ya supera el intervalo → aviso
+            interval = it.get("interval_km")
+            if interval and odometer >= interval:
+                if _insert_alert(c, conn, "mantenimiento", "warning",
+                                 f"📅 {name}: sin registrar y el odómetro ya supera el intervalo ({interval} km)."):
+                    new_alerts.append(f"📅 {name}: sin registrar, toca servicio")
+            elif it.get("interval_days"):
+                # Sin fecha de servicio y sin registro → aviso suave si el plan existe
+                if _insert_alert(c, conn, "mantenimiento", "info",
+                                 f"📅 {name}: sin registro de último servicio."):
+                    new_alerts.append(f"📅 {name}: sin registrar")
+            continue
         if it["overdue"]:
-            if _insert_alert(c, conn, f"maint_{it['id']}", "warning",
-                             f"📅 {it['icon']} {it['name']}: intervalo superado ({it['pct']:.0f}%)"):
-                new_alerts.append(f"📅 {it['icon']} {it['name']}: toca revisión")
+            if _insert_alert(c, conn, "mantenimiento", "warning",
+                             f"📅 {name}: intervalo superado ({it['pct']:.0f}%)"):
+                new_alerts.append(f"📅 {name}: toca revisión")
+        elif it.get("pct") is not None and it["pct"] >= 90:
+            if _insert_alert(c, conn, "mantenimiento", "info",
+                             f"📅 {name}: próximo al intervalo ({it['pct']:.0f}%)"):
+                new_alerts.append(f"📅 {name}: casi toca revisión")
 
     # ITV próxima a vencer (< itv_notify_days) — aviso único
     itv = get_itv()
