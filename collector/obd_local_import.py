@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""obd_local_import.py — importa el SQLite local de vehicle tablet en obd_telemetry.db.
+"""obd_local_import.py — importa el SQLite local de Polar Star en obd_telemetry.db.
 
-La tablet (vehicle tablet) recopila OBD2+GPS localmente (~/obd_data/obd_local.db)
+La tablet (Polar Star) recopila OBD2+GPS localmente (~/obd_data/obd_local.db)
 sin depender de Internet. Cuando hay red, sube el fichero completo por SCP a
 ~/.hermes/data/incoming/polar_obd_local.db. Este script mergea esas filas en
 obd_telemetry.db reutilizando la sesión activa actual, con dedup por timestamp.
@@ -57,6 +57,13 @@ def connect_db(path, wal=True):
             conn.execute("PRAGMA journal_mode=WAL")
         except sqlite3.OperationalError:
             pass
+    # Migración idempotente: fuel_rate (PID 015E) puede no existir en BDs viejas
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(readings)")]
+        if "fuel_rate" not in cols:
+            conn.execute("ALTER TABLE readings ADD COLUMN fuel_rate REAL")
+    except sqlite3.OperationalError:
+        pass
     return conn
 
 
@@ -113,10 +120,11 @@ def get_or_create_active_session(conn, start_ts, first_new_ts=None):
 
 def import_readings(conn, local_conn, session_id, ts_min=None, ts_max=None):
     try:
-        # Columnas diésel (map/ambient/fuel_pressure) pueden no existir en
-        # ficheros antiguos → consulta dinámica según PRAGMA del fichero local
+        # Columnas diésel (map/ambient/fuel_pressure/fuel_rate) pueden no existir
+        # en ficheros antiguos → consulta dinámica según PRAGMA del fichero local
         local_cols = [r[1] for r in local_conn.execute("PRAGMA table_info(readings)")]
-        diesel = [c for c in ("map", "ambient", "fuel_pressure") if c in local_cols]
+        diesel = [c for c in ("map", "ambient", "fuel_pressure", "fuel_rate")
+                  if c in local_cols]
         sel = "timestamp, rpm, speed, coolant, throttle, intake, fuel, maf, voltage"
         if diesel:
             sel += ", " + ", ".join(diesel)
@@ -146,10 +154,12 @@ def import_readings(conn, local_conn, session_id, ts_min=None, ts_max=None):
             continue
         conn.execute(
             "INSERT INTO readings (session_id, timestamp, rpm, speed, coolant_temp, "
-            "throttle_pos, intake_temp, fuel_level, maf, voltage, map, ambient, fuel_pressure) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "throttle_pos, intake_temp, fuel_level, maf, voltage, map, ambient, "
+            "fuel_pressure, fuel_rate) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (session_id, ts, rpm, speed, coolant, throttle, intake, fuel, maf, voltage,
-             dmap.get("map"), dmap.get("ambient"), dmap.get("fuel_pressure")))
+             dmap.get("map"), dmap.get("ambient"), dmap.get("fuel_pressure"),
+             dmap.get("fuel_rate")))
         existing.add(ts)
         inserted += 1
     return inserted
@@ -242,8 +252,10 @@ def import_dtcs(conn, local_conn, session_id):
     quedan en el histórico pero nunca aparecen como DTC activo."""
     try:
         ignored = set((load_config().get("vehicle", {}) or {}).get("ignored_dtcs", {}).keys())
+        descs = (load_config().get("dtc_descriptions", {}) or {})
     except Exception:
         ignored = set()
+        descs = {}
     try:
         rows = local_conn.execute(
             "SELECT timestamp, code, description, kind FROM dtc ORDER BY timestamp").fetchall()
@@ -255,6 +267,11 @@ def import_dtcs(conn, local_conn, session_id):
     updated = 0
     for ts, code, desc, kind in rows:
         cleared = 1 if code in ignored else 0
+        # La tablet manda descripción vacía; usar la del config como fallback
+        # (FIX 2026-08-21: sin esto, los DTCs sin descripción local pisaban la BD
+        # y la webapp mostraba "Sin descripción" aunque el config las tuviera).
+        if not desc:
+            desc = descs.get(code, "")
         exists = conn.execute(
             "SELECT id FROM dtc WHERE code=? LIMIT 1", (code,)).fetchone()
         if exists:

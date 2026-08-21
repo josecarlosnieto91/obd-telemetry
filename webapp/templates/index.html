@@ -158,11 +158,27 @@ async function update() {
                 ).join('');
                 dtcBox.innerHTML =
                     `<ul class="dtc-list">${dtcList}</ul>
-                     <p class="muted" style="margin-top:8px;"><a href="/trips">Detalle completo en el historial de viajes →</a></p>`;
+                     <p class="muted" style="margin-top:8px;"><a href="/trips">Detalle completo en el historial de viajes →</a></p>
+                     <p class="muted" style="margin-top:4px;">
+                       <button class="btn" style="font-size:12px;padding:3px 8px;" onclick="clearDtcs()">🗑 Borrar DTCs</button>
+                       <span class="muted" style="font-size:11px;"> (para verificar tras el mantenimiento)</span>
+                     </p>`;
                 document.getElementById('dtc-summary').className = 'card danger';
             } else {
                 dtcBox.innerHTML = '<p class="muted">Sin códigos registrados</p>';
                 document.getElementById('dtc-summary').className = 'card';
+            }
+        }
+
+        // Marca los DTCs como borrados (cleared=1) — no los elimina del histórico
+        async function clearDtcs() {
+            if (!confirm('¿Marcar todos los DTCs como borrados? No se eliminan del histórico — sirve para verificar si el mantenimiento los resolvió.')) return;
+            const r = await fetch('/api/dtcs/clear', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'});
+            const j = await r.json();
+            if (j.success) {
+                location.reload();
+            } else {
+                alert('Error al borrar DTCs');
             }
         }
 

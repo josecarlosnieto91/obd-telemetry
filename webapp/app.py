@@ -203,6 +203,24 @@ def api_acknowledge():
     return jsonify({"success": True})
 
 
+@app.route("/api/dtcs/clear", methods=["POST"])
+def api_dtcs_clear():
+    """Marca los DTCs como borrados (cleared=1) para que no aparezcan como
+    activos. No los elimina: quedan en el histórico. Útil para verificar que
+    un mantenimiento resolvió el fallo (si el código reaparece, sigue ahí)."""
+    data = request.get_json() or {}
+    codes = data.get("codes")  # lista de códigos; si es None, borra todos
+    conn = get_db()
+    if codes:
+        for code in codes:
+            conn.execute("UPDATE dtc SET cleared=1 WHERE code=?", (code,))
+    else:
+        conn.execute("UPDATE dtc SET cleared=1")
+    conn.commit()
+    conn.close()
+    return jsonify({"success": True, "cleared": codes or "all"})
+
+
 @app.route("/api/stats")
 def api_stats():
     """Overall statistics"""
@@ -461,7 +479,7 @@ import xml.etree.ElementTree as ET
 def parse_gpx(path):
     """Extrae (lat, lon) de un GPX. Devuelve lista de [lat, lon].
 
-    Seguridad: los GPX los genera nuestro propio logger en vehicle tablet
+    Seguridad: los GPX los genera nuestro propio logger en Polar Star
     (input confiable), pero se deshabilitan entidades externas para
     eliminar el riesgo XXE por si algún día llega un archivo externo.
     """
