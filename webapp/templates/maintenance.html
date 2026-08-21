@@ -113,13 +113,29 @@ async function loadTips() {
 
     if (driving.length > 0) {
         document.getElementById('tips-driving').innerHTML = driving.slice(-10).reverse().map(tipHTML).join('');
+    } else {
+        // Distinguir: ¿hay tips históricos descartados o nunca hubo?
+        const allDriving = alerts.filter(a => a.category === 'conduccion');
+        document.getElementById('tips-driving').innerHTML = allDriving.length > 0
+            ? '<li class="muted">Recomendaciones anteriores descartadas. <a href="/alerts">Ver histórico →</a></li>'
+            : '<li class="muted">Datos insuficientes. Realiza más viajes para obtener recomendaciones.</li>';
     }
     if (maintenance.length > 0 || maintWarnings.length > 0) {
         const all = [...maintWarnings, ...maintenance].slice(-10).reverse();
         document.getElementById('tips-maintenance').innerHTML = all.map(tipHTML).join('');
+    } else {
+        const allMaint = alerts.filter(a => a.category === 'mantenimiento');
+        document.getElementById('tips-maintenance').innerHTML = allMaint.length > 0
+            ? '<li class="muted">Recomendaciones de mantenimiento descartadas. <a href="/alerts">Ver histórico →</a></li>'
+            : '<li class="muted">Sin incidencias registradas.</li>';
     }
     if (usage.length > 0) {
         document.getElementById('tips-usage').innerHTML = usage.slice(-10).reverse().map(tipHTML).join('');
+    } else {
+        const allUsage = alerts.filter(a => a.category === 'uso');
+        document.getElementById('tips-usage').innerHTML = allUsage.length > 0
+            ? '<li class="muted">Recomendaciones de uso descartadas. <a href="/alerts">Ver histórico →</a></li>'
+            : '<li class="muted">Sin recomendaciones aún.</li>';
     }
 }
 
