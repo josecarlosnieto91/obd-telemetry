@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Resumen de viaje vehicle tablet — cierra sesiones OBD2 terminadas y emite resumen.
+"""Resumen de viaje Polar Star — cierra sesiones OBD2 terminadas y emite resumen.
 
 Patrón cron no_agent:
   - stdout VACÍO  → silencio (no hay viaje terminado, no se entrega nada)
@@ -59,6 +59,8 @@ def _threshold(key, fallback):
 
 
 DENSITY_FUEL = _fuel_density()  # g/L — usado en el cálculo de consumo MAF
+DIESEL_AFR = 30.0               # relación aire-combustible diésel típica en crucero
+                                # (fallback cuando no hay fuel_rate del PID 015E)
 
 
 def connect_db(path, row_factory=True):
@@ -77,6 +79,14 @@ def connect_db(path, row_factory=True):
         pass  # WAL no disponible en algún FS raro; timeout sigue protegiendo
     if row_factory:
         conn.row_factory = sqlite3.Row
+    # Migración idempotente: consumo por viaje (fuel_liters, consumption_l100)
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(sessions)")]
+        for col in ("fuel_liters", "consumption_l100"):
+            if col not in cols:
+                conn.execute(f"ALTER TABLE sessions ADD COLUMN {col} REAL")
+    except sqlite3.OperationalError:
+        pass
     return conn
 
 
@@ -251,7 +261,7 @@ def main():
         )
         positions = [dict(r) for r in c.fetchall()]
         c.execute(
-            "SELECT timestamp, rpm, speed, coolant_temp, maf FROM readings WHERE session_id=? ORDER BY id",
+            "SELECT timestamp, rpm, speed, coolant_temp, maf, fuel_rate FROM readings WHERE session_id=? ORDER BY id",
             (sid,),
         )
         readings = [dict(r) for r in c.fetchall()]
@@ -309,32 +319,64 @@ def main():
             conn.commit()
             continue  # silencio: no es un viaje, no hay resumen ni Janus
 
-        # Consumo estimado: MAF (g/s) → l/100km instantáneo cuando speed > 3
+        # Consumo: CAN del decodificador Witson (L/100km directos, fuente
+        # primaria) > fuel_rate OBD 015E (L/h) > MAF/AFR (estimación).
+        # v4.8: can_readings trae consumption_l100 del CAN real.
         cons_inst = []
         litros = 0.0
-        prev_r = None
-        for r in active:
-            if r["maf"] is not None:
-                if prev_r is not None:
-                    t1, t2 = parse_ts(prev_r["timestamp"]), parse_ts(r["timestamp"])
-                    if t1 and t2:
-                        dt_h = (t2 - t1).total_seconds() / 3600.0
-                        litros += (r["maf"] / DENSITY_FUEL) * dt_h
-                prev_r = r
-                if r["speed"] and r["speed"] > 3:
-                    l100 = (r["maf"] / DENSITY_FUEL) * 3600.0 / r["speed"] * 100.0
-                    if 0 < l100 < 60:
-                        cons_inst.append(l100)
+        can_used = False
+        try:
+            can_rows = conn.execute(
+                "SELECT consumption_l100 FROM can_readings "
+                "WHERE ts >= ? AND ts <= ? AND consumption_l100 > 0 AND consumption_l100 < 60 "
+                "ORDER BY ts",
+                (start.isoformat(), end_ts.isoformat())).fetchall()
+            if can_rows:
+                cons_inst = [r[0] for r in can_rows]
+                can_used = True
+                litros = (sum(cons_inst) / len(cons_inst)) * dist / 100.0
+        except Exception:
+            pass
+
+        if not can_used:
+            prev_r = None
+            for r in active:
+                if r.get("fuel_rate") is not None and r["fuel_rate"] > 0:
+                    # Consumo real de la ECU: L/h → litros en el intervalo
+                    if prev_r is not None:
+                        t1, t2 = parse_ts(prev_r["timestamp"]), parse_ts(r["timestamp"])
+                        if t1 and t2:
+                            dt_h = (t2 - t1).total_seconds() / 3600.0
+                            litros += r["fuel_rate"] * dt_h
+                    prev_r = r
+                    if r["speed"] and r["speed"] > 3:
+                        l100 = r["fuel_rate"] / r["speed"] * 100.0
+                        if 0 < l100 < 60:
+                            cons_inst.append(l100)
+                elif r["maf"] is not None:
+                    # Fallback MAF: litros = aire / AFR / densidad
+                    if prev_r is not None:
+                        t1, t2 = parse_ts(prev_r["timestamp"]), parse_ts(r["timestamp"])
+                        if t1 and t2:
+                            dt_h = (t2 - t1).total_seconds() / 3600.0
+                            litros += (r["maf"] / DIESEL_AFR / DENSITY_FUEL) * dt_h
+                    prev_r = r
+                    if r["speed"] and r["speed"] > 3:
+                        l100 = (r["maf"] / DIESEL_AFR / DENSITY_FUEL) * 3600.0 / r["speed"] * 100.0
+                        if 0 < l100 < 60:
+                            cons_inst.append(l100)
         cons_medio = (sum(cons_inst) / len(cons_inst)) if cons_inst else None
         if litros <= 0 and cons_medio and dist > 0:
             litros = cons_medio * dist / 100.0
 
-        # Actualizar sesión
+        # Actualizar sesión (incluye consumo: litros + media l/100km)
         c.execute(
             """UPDATE sessions SET end_time=?, status='completed', distance_km=?,
-               max_speed=?, avg_speed=?, max_rpm=?, driving_minutes=? WHERE id=?""",
+               max_speed=?, avg_speed=?, max_rpm=?, driving_minutes=?,
+               fuel_liters=?, consumption_l100=? WHERE id=?""",
             (end_ts.isoformat(), round(dist, 2), round(max_speed, 1),
-             round(avg_speed, 1), round(max_rpm, 1), dur_min, sid),
+             round(avg_speed, 1), round(max_rpm, 1), dur_min,
+             round(litros, 2), round(cons_medio, 1) if cons_medio else None, sid),
         )
         conn.commit()
 
@@ -349,7 +391,15 @@ def main():
         if max_rpm:
             lines.append(f"🔧 RPM máx {max_rpm:.0f} · temp máx {max_temp:.0f}°C")
         if cons_medio:
-            lines.append(f"⛽ consumo estimado {cons_medio:.1f} l/100km (~{litros:.1f} L)")
+            # Real CAN (v4.8) si se usaron can_readings; si no, real OBD 015E;
+            # si no, estimación MAF/AFR
+            if can_used:
+                tag = "consumo CAN"
+            else:
+                used_real = any(r.get("fuel_rate") is not None and r["fuel_rate"] > 0
+                                for r in active)
+                tag = "consumo" if used_real else "consumo est."
+            lines.append(f"⛽ {tag} {cons_medio:.1f} l/100km (~{litros:.1f} L)")
         if positions:
             lastp = positions[-1]
             lugar = reverse_geocode(lastp["lat"], lastp["lon"])
