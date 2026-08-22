@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""obd_local_collector.py — recolector OBD2 LOCAL en vehicle tablet (autónomo, sin Internet).
+"""obd_local_collector.py — recolector OBD2 LOCAL en Polar Star (autónomo, sin Internet).
 
 Lee el bridge TCP 127.0.0.1:22000 (VgateBridge) + GPS local (termux-location),
 guarda en SQLite local ~/obd_data/obd_local.db. No depende de red: si no hay
-Internet, la captura sigue. Sync oportunista a server vía SCP cada ~10 min
-cuando hay red (MagicDNS: server, no IP).
+Internet, la captura sigue. Sync oportunista a Cassiopeia vía SCP cada ~10 min
+cuando hay red (MagicDNS: cassiopeia, no IP).
 
 v2 (2026-08-03): añade lectura de DTCs (Mode 03 almacenados + 07 pendientes)
 cada ciclo de sync, con descripciones del fichero de configuración del
 vehículo (~/obd_vehicle_config.json). Todo local.
 
 Mantenido vivo por polar_boot_extra.sh (crond cada minuto, idempotente).
-Copia maestra: ~/.hermes/scripts/obd_local_collector.py en server.
+Copia maestra: ~/.hermes/scripts/obd_local_collector.py en Cassiopeia.
 """
 import fcntl
 import json
@@ -31,8 +31,10 @@ LOG_PATH = os.path.join(DATA_DIR, "obd_local.log")
 CONFIG_PATH = os.path.join(HOME, "obd_vehicle_config.json")
 BRIDGE_HOST = "127.0.0.1"
 BRIDGE_PORT = 22000
-CASSIOPEIA = "user@server"          # MagicDNS — no IP hardcodeada
-INCOMING_PATH = "~/.hermes/data/incoming/polar_obd_local.db"
+CASSIOPEIA = "josecnr91@cassiopeia"          # MagicDNS — no IP hardcodeada
+INCOMING_PATH = "/home/josecnr91/.hermes/data/incoming/polar_obd_local.db"
+# v4.8: CSV del CanSnifferService (consumo CAN del decodificador Witson)
+CAN_CSV_PATH = os.environ.get("CAN_CSV_PATH", "/sdcard/Download/can_readings.csv")
 SSH_KEY = os.path.join(HOME, ".ssh", "id_ed25519")
 
 INTERVAL = 30            # segundos entre ciclos
@@ -48,6 +50,7 @@ PIDS = [
     ("intake", "010F"),
     ("fuel", "012F"),
     ("maf", "0110"),
+    ("fuel_rate", "015E"),   # Engine Fuel Rate (L/h) — consumo real de la ECU
 ]
 
 # PIDs diésel adicionales (solo se leen si el escaneo dice que el motor los soporta)
@@ -96,7 +99,7 @@ def db_connect():
         rpm REAL, speed REAL, coolant REAL, throttle REAL,
         intake REAL, fuel REAL, maf REAL, voltage REAL)""")
     # Columnas diésel (PIDs extendidos, opcionales según soporte del motor)
-    for col in ("map", "ambient", "fuel_pressure"):
+    for col in ("map", "ambient", "fuel_pressure", "fuel_rate"):
         try:
             conn.execute(f"ALTER TABLE readings ADD COLUMN {col} REAL")
         except sqlite3.OperationalError:
@@ -111,6 +114,13 @@ def db_connect():
         description TEXT,
         kind TEXT,
         PRIMARY KEY (code, kind))""")
+    # v4.8: lecturas CAN del decodificador (CanSnifferService → CSV → aquí).
+    # ts es PK → INSERT OR IGNORE evita duplicados al re-importar.
+    conn.execute("""CREATE TABLE IF NOT EXISTS can_readings (
+        ts TEXT PRIMARY KEY,
+        consumption_l100 REAL,
+        range_km REAL,
+        odometer_km REAL)""")
     conn.execute("""CREATE TABLE IF NOT EXISTS fap_events (
         start_ts TEXT PRIMARY KEY,
         end_ts TEXT,
@@ -182,6 +192,8 @@ def parse_hex_response(resp):
         return payload[0] - 40
     if pid == "23" and len(payload) >= 2:   # Fuel rail pressure
         return round((payload[0] * 256 + payload[1]) * 10.0, 1)  # kPa
+    if pid == "5E" and len(payload) >= 2:   # Engine Fuel Rate (L/h)
+        return round((payload[0] * 256 + payload[1]) * 0.01, 3)
     return None
 
 
@@ -436,19 +448,59 @@ def revive_bridge():
     try:
         subprocess.run(
             ["am", "startservice", "-n",
-             "com.server.vgatebridge/.BridgeService",
-             "-a", "com.server.vgatebridge.START"],
+             "com.cassiopeia.vgatebridge/.BridgeService",
+             "-a", "com.cassiopeia.vgatebridge.START"],
             capture_output=True, timeout=10)
     except Exception:
         pass
 
 
-def sync_to_server():
+def import_can_csv(conn):
+    """Importa el CSV del CanSnifferService (consumo CAN real del decodificador)
+    a la tabla can_readings local. Devuelve nº de filas nuevas.
+
+    CSV en /sdcard/Download/can_readings.csv: ts,consumption_l100,range_km,odometer_km
+    ts es PK → INSERT OR IGNORE. Tras importar, se vacía el CSV (el dato ya
+    está en la BD local, que es lo que se sincroniza a Cassiopeia).
+    """
+    csv_path = CAN_CSV_PATH
+    if not os.path.exists(csv_path):
+        return 0
+    imported = 0
+    try:
+        with open(csv_path, "r") as f:
+            lines = f.readlines()
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith("ts,"):
+                continue
+            parts = line.split(",")
+            if len(parts) < 4:
+                continue
+            try:
+                ts, cons, rng, odom = parts[0], float(parts[1]), float(parts[2]), float(parts[3])
+            except ValueError:
+                continue
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO can_readings (ts, consumption_l100, range_km, odometer_km) "
+                "VALUES (?,?,?,?)", (ts, cons, rng, odom))
+            imported += cur.rowcount
+        if imported:
+            conn.commit()
+            # Vaciar el CSV: ya está en la BD local (y por tanto en el próximo sync)
+            open(csv_path, "w").close()
+            log(f"CAN: {imported} lecturas importadas del CSV")
+    except Exception as e:
+        log(f"CAN: error importando CSV: {e}")
+    return imported
+
+
+def sync_to_cassiopeia():
     """Sube una copia consistente si hay red. No bloquea la recolección.
 
     ⚠️ RACE FIX 2026-08-05: antes hacía `scp DB_PATH` mientras el proceso
     seguía escribiendo en el fichero → copia inconsistente/corrupta en
-    server (el importador podía recibir un SQLite a medias). Ahora se
+    Cassiopeia (el importador podía recibir un SQLite a medias). Ahora se
     genera una copia consistente con la API de backup de SQLite (snapshot
     atómico del estado actual) y se sube esa copia. La recolección en el
     fichero principal no se interrumpe.
@@ -716,13 +768,13 @@ def main():
         with conn:
             if reading:
                 conn.execute(
-                    "INSERT OR IGNORE INTO readings VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT OR IGNORE INTO readings VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (ts, reading.get("rpm"), reading.get("speed"),
                      reading.get("coolant"), reading.get("throttle"),
                      reading.get("intake"), reading.get("fuel"),
                      reading.get("maf"), reading.get("voltage"),
                      reading.get("map"), reading.get("ambient"),
-                     reading.get("fuel_pressure")))
+                     reading.get("fuel_pressure"), reading.get("fuel_rate")))
                 update_calibration(conn, reading)
                 detect_fap_regen(conn, reading, ts)
             if position:
@@ -753,9 +805,11 @@ def main():
             log(f"ciclo {counter}: readings={reading is not None} gps={position is not None}{extra}")
 
         counter += 1
+        # Importar consumo CAN del CSV (CanSnifferService) antes del sync
+        import_can_csv(conn)
         if counter % SYNC_EVERY == 0:
-            if sync_to_server():
-                log("Sync a server OK")
+            if sync_to_cassiopeia():
+                log("Sync a Cassiopeia OK")
             # Si no hay red, silencio — se reintenta en el próximo ciclo de sync
 
         time.sleep(INTERVAL)

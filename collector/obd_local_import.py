@@ -64,6 +64,17 @@ def connect_db(path, wal=True):
             conn.execute("ALTER TABLE readings ADD COLUMN fuel_rate REAL")
     except sqlite3.OperationalError:
         pass
+    # v4.8: tabla can_readings (consumo CAN del decodificador Witson)
+    try:
+        conn.execute("""CREATE TABLE IF NOT EXISTS can_readings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER,
+            ts TEXT NOT NULL,
+            consumption_l100 REAL,
+            range_km REAL,
+            odometer_km REAL)""")
+    except sqlite3.OperationalError:
+        pass
     return conn
 
 
@@ -288,6 +299,36 @@ def import_dtcs(conn, local_conn, session_id):
     return inserted + updated
 
 
+def import_can_readings(conn, local_conn):
+    """Importa lecturas CAN del decodificador (tabla can_readings de la tablet,
+    poblada por el recolector desde el CSV del CanSnifferService)."""
+    try:
+        local_cols = [r[1] for r in local_conn.execute("PRAGMA table_info(can_readings)")]
+        if "consumption_l100" not in local_cols:
+            return 0
+        rows = local_conn.execute(
+            "SELECT ts, consumption_l100, range_km, odometer_km FROM can_readings "
+            "ORDER BY ts").fetchall()
+    except sqlite3.OperationalError:
+        return 0
+    if not rows:
+        return 0
+    existing = set(r[0] for r in conn.execute(
+        "SELECT ts FROM can_readings WHERE ts BETWEEN ? AND ?",
+        (rows[0][0], rows[-1][0])).fetchall())
+    inserted = 0
+    for ts, cons, rng, odom in rows:
+        if ts in existing:
+            continue
+        conn.execute(
+            "INSERT INTO can_readings (session_id, ts, consumption_l100, range_km, odometer_km) "
+            "VALUES (?,?,?,?,?)",
+            (None, ts, cons, rng, odom))
+        existing.add(ts)
+        inserted += 1
+    return inserted
+
+
 def import_fap_events(conn, local_conn):
     """Importa eventos de regeneración FAP detectados en la tablet."""
     try:
@@ -415,26 +456,47 @@ def main():
         n_dtc = import_dtcs(target_conn, local_conn, session_id or 0)
         n_fap = import_fap_events(target_conn, local_conn)
         n_cal = import_calibration(target_conn, local_conn)
+        n_can = import_can_readings(target_conn, local_conn)
         target_conn.commit()
 
         os.makedirs(PROCESSED_DIR, exist_ok=True)
         stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         shutil.move(INCOMING, os.path.join(PROCESSED_DIR, f"polar_obd_local_{stamp}.db"))
 
-        if n_read or n_pos or n_dtc or n_fap or n_cal:
+        if n_read or n_pos or n_dtc or n_fap or n_cal or n_can:
             # Silencio en stdout (cron no_agent): traza a log de import.
             try:
                 with open(os.path.join(PROCESSED_DIR, "import.log"), "a") as lf:
                     lf.write(f"{datetime.datetime.now().isoformat()} "
                              f"import {n_read} readings, {n_pos} positions, "
-                             f"{n_dtc} dtc, {n_fap} fap, {n_cal} cal "
+                             f"{n_dtc} dtc, {n_fap} fap, {n_cal} cal, {n_can} can "
                              f"(session {session_id})\n")
             except Exception:
                 pass
         return 0
     except Exception as error:
-        print(f"ERROR import: {error}", file=sys.stderr)
-        return 1
+        # ⚠️ FIX 2026-08-22: BD entrante corrupta ("database disk image is
+        # malformed"). Antes: exit 1 SIN mover el fichero → el cron reintentaba
+        # cada 5 min y notificaba siempre el mismo error. Ahora: se mueve a
+        # corrupt/ (preservando el dato para diagnóstico/recuperación manual)
+        # y se sale en silencio (exit 0) para que el cron no vuelva a fallar.
+        if os.path.exists(INCOMING):
+            try:
+                corrupt_dir = os.path.join(PROCESSED_DIR, "corrupt")
+                os.makedirs(corrupt_dir, exist_ok=True)
+                stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                shutil.move(INCOMING, os.path.join(corrupt_dir, f"polar_obd_local_{stamp}.db"))
+                try:
+                    with open(os.path.join(PROCESSED_DIR, "import.log"), "a") as lf:
+                        lf.write(f"{datetime.datetime.now().isoformat()} "
+                                 f"CORRUPT moved to corrupt/ ({error})\n")
+                except Exception:
+                    pass
+            except Exception as move_error:
+                print(f"ERROR import: {error} (y no se pudo mover: {move_error})",
+                      file=sys.stderr)
+                return 1
+        return 0
 
 
 if __name__ == "__main__":
