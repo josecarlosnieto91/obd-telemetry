@@ -33,8 +33,11 @@ BRIDGE_HOST = "127.0.0.1"
 BRIDGE_PORT = 22000
 CASSIOPEIA = "josecnr91@cassiopeia"          # MagicDNS — no IP hardcodeada
 INCOMING_PATH = "/home/josecnr91/.hermes/data/incoming/polar_obd_local.db"
-# v4.8: CSV del CanSnifferService (consumo CAN del decodificador Witson)
-CAN_CSV_PATH = os.environ.get("CAN_CSV_PATH", "/sdcard/Download/can_readings.csv")
+# v4.8: CSV del CanSnifferService (consumo CAN del decodificador Witson).
+# Ruta getExternalFilesDir del APK (Android 10: /sdcard/Download exige permiso
+# runtime; esta ruta no). Termux puede leerla con permiso de storage.
+CAN_CSV_PATH = os.environ.get("CAN_CSV_PATH",
+    "/sdcard/Android/data/com.cassiopeia.vgatebridge/files/Download/can_readings.csv")
 SSH_KEY = os.path.join(HOME, ".ssh", "id_ed25519")
 
 INTERVAL = 30            # segundos entre ciclos
