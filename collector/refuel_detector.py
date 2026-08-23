@@ -69,6 +69,9 @@ def main():
     min_jump_pct = float(thr.get("refuel_min_jump_pct", DEFAULT_MIN_JUMP_PCT))
     # Rango esperado con depósito lleno (calibrable) — para marcar full_tank
     full_range_km = float(vehicle.get("full_range_km", capacity * km_per_l))
+    # NOTA: no sumar reserva al cálculo. El km_per_l está calibrado con el
+    # surtidor real (54,35 L → 973 km de salto = 17,90 km/L), así que la
+    # reserva (~5,6 L con rango a 0) YA queda absorbida en el factor.
 
     conn = sqlite3.connect(OBD_DB)
     conn.row_factory = sqlite3.Row

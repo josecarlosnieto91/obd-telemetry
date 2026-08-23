@@ -24,8 +24,9 @@
     "fuel_price_product": "Gasoleo A",
     "has_turbo": true,
     "has_dpf": true,
-    "range_km_per_l": 13.0,
-    "full_range_km": 780.0
+    "range_km_per_l": 17.9,
+    "full_range_km": 980.0,
+    "reserve_liters": 5.6
   },
   "thresholds": {
     "coolant_warn_c": 95,
