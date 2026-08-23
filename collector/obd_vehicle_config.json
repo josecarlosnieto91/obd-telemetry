@@ -60,7 +60,7 @@
     "trip_short_min": 10,
     "trip_short_km": 5,
     "trip_long_km": 150,
-    "refuel_min_jump_km": 30.0
+    "refuel_min_jump_km": 100.0
   },
   "maintenance": [
     {
