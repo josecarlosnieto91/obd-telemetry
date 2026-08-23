@@ -67,6 +67,8 @@ def main():
     km_per_l = float(vehicle.get("range_km_per_l", DEFAULT_KM_PER_L))
     min_jump_km = float(thr.get("refuel_min_jump_km", DEFAULT_MIN_JUMP_KM))
     min_jump_pct = float(thr.get("refuel_min_jump_pct", DEFAULT_MIN_JUMP_PCT))
+    # Rango esperado con depósito lleno (calibrable) — para marcar full_tank
+    full_range_km = float(vehicle.get("full_range_km", capacity * km_per_l))
 
     conn = sqlite3.connect(OBD_DB)
     conn.row_factory = sqlite3.Row
@@ -153,8 +155,10 @@ def main():
                     # repostar o por maniobras de decodificador; min_jump filtra)
                     if jump_km >= min_jump_km:
                         liters = jump_km / km_per_l
-                        # Lleno si el salto es grande (≈ depósito entero o casi)
-                        full = 1 if liters >= capacity * 0.8 else 0
+                        # Lleno si el rango tras repostar está cerca del máximo
+                        # (el depósito del C4 no es lineal: 60 L no implican
+                        # que un llenado dé litros >= 80% capacidad)
+                        full = 1 if r["range_km"] >= full_range_km * 0.8 else 0
                         n = insert_refuel(r["ts"], prev["ts"],
                                           prev["range_km"], r["range_km"],
                                           liters, full, None, "can_range")
