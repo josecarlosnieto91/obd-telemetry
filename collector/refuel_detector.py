@@ -115,7 +115,24 @@ def main():
         return None
 
     def insert_refuel(ts, prev_ts, before, after, liters, full, session_id, source):
-        """Inserta repostaje si no existe (UNIQUE prev_ts+ts)."""
+        """Inserta repostaje si no existe (UNIQUE prev_ts+ts) y no duplica un
+        repostaje lleno reciente con el mismo rango final (el mismo llenado
+        llega en varias tandas de sync con timestamps distintos — FIX
+        2026-08-23: guarda anti-duplicado por rango_despues similar)."""
+        if full:
+            # Si ya hay un repostaje lleno en las últimas 12h con rango final
+            # cercano (±30 km), es el MISMO llenado re-importado → ignorar
+            try:
+                from datetime import timedelta
+                cutoff = (datetime.fromisoformat(ts) - timedelta(hours=12)).isoformat()
+                dup = c.execute(
+                    "SELECT id FROM refuels WHERE full_tank=1 AND source=? "
+                    "AND fuel_after BETWEEN ? AND ? AND ts >= ? ORDER BY id DESC LIMIT 1",
+                    (source, after - 30, after + 30, cutoff)).fetchone()
+            except Exception:
+                dup = None
+            if dup:
+                return 0
         price, cost, station = None, None, None
         pos = position_near(ts)
         if pos:
@@ -154,13 +171,16 @@ def main():
             for r in can_rows:
                 if prev is not None:
                     jump_km = r["range_km"] - prev["range_km"]
-                    # Salto positivo de rango = repostaje (el rango solo sube al
-                    # repostar o por maniobras de decodificador; min_jump filtra)
-                    if jump_km >= min_jump_km:
+                    # Repostaje real: salto GRANDE (>= min_jump_km, 100 km) y
+                    # rango previo BAJO (< 60% del lleno). FIX 2026-08-23:
+                    # antes bastaba salto >= 30 km → ruido del decodificador
+                    # con depósito lleno (840→880) se detectaba como repostaje.
+                    # Con el depósito ya lleno el rango fluctúa pero no es un
+                    # repostaje: exigir rango_prev claramente por debajo.
+                    if (jump_km >= min_jump_km
+                            and prev["range_km"] < full_range_km * 0.6):
                         liters = jump_km / km_per_l
                         # Lleno si el rango tras repostar está cerca del máximo
-                        # (el depósito del C4 no es lineal: 60 L no implican
-                        # que un llenado dé litros >= 80% capacidad)
                         full = 1 if r["range_km"] >= full_range_km * 0.8 else 0
                         n = insert_refuel(r["ts"], prev["ts"],
                                           prev["range_km"], r["range_km"],
