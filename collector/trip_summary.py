@@ -400,6 +400,21 @@ def main():
                                 for r in active)
                 tag = "consumo" if used_real else "consumo est."
             lines.append(f"⛽ {tag} {cons_medio:.1f} l/100km (~{litros:.1f} L)")
+        # Combustible restante estimado desde el rango CAN (si hay datos)
+        try:
+            vcfg = (load_config().get("vehicle", {}) or {})
+            km_per_l = float(vcfg.get("range_km_per_l", 17.90))
+            reserve_l = float(vcfg.get("reserve_liters", 5.6))
+            last_range = conn.execute(
+                "SELECT range_km FROM can_readings WHERE range_km IS NOT NULL "
+                "AND ts <= ? ORDER BY ts DESC LIMIT 1",
+                (end_ts.isoformat(),)).fetchone()
+            if last_range and last_range["range_km"] is not None and last_range["range_km"] > 0:
+                rango = last_range["range_km"]
+                litros_rest = rango / km_per_l + reserve_l
+                lines.append(f"🛢️ Restante: ~{litros_rest:.0f} L (rango {rango:.0f} km)")
+        except Exception:
+            pass
         if positions:
             lastp = positions[-1]
             lugar = reverse_geocode(lastp["lat"], lastp["lon"])
