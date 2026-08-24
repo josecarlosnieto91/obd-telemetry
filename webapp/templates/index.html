@@ -28,9 +28,9 @@
             <div class="stat-unit">V</div>
         </div>
         <div class="stat-card" id="stat-fuel">
-            <div class="stat-label">Combustible</div>
+            <div class="stat-label">Combustible rest.</div>
             <div class="stat-value">—</div>
-            <div class="stat-unit">%</div>
+            <div class="stat-unit" id="stat-fuel-unit">L</div>
         </div>
         <div class="stat-card" id="stat-load">
             <div class="stat-label">Carga Motor</div>
@@ -134,7 +134,9 @@ async function update() {
             // Resto: último valor registrado, o — si nunca hubo
             gauges.temp.textContent = d.coolant_temp ?? '—';
             gauges.voltage.textContent = d.voltage ?? '—';
-            gauges.fuel.textContent = d.fuel_level ?? '—';
+            gauges.fuel.textContent = d.fuel_level != null ? d.fuel_level + '%' : (d.fuel_remaining_l != null ? '~' + d.fuel_remaining_l + ' L' : '—');
+            const fuelUnit = document.getElementById('stat-fuel-unit');
+            if (fuelUnit) fuelUnit.textContent = d.fuel_level != null ? '%' : 'L';
             gauges.load.textContent = d.engine_load ?? '—';
             gauges.map.textContent = d.map ?? '—';
 

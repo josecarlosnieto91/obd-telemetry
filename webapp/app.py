@@ -62,6 +62,26 @@ def api_status():
     if ignored:
         dtcs_active = [d for d in dtcs_active if d["code"] not in ignored]
 
+    # Combustible restante estimado desde el rango CAN (el C4 no expone
+    # fuel_level por OBD; la señal fiable es el rango del decodificador)
+    fuel_remaining = None
+    fuel_range = None
+    if latest:
+        try:
+            cfg = car_status.load_config()
+            vcfg = cfg.get("vehicle", {}) or {}
+            km_per_l = float(vcfg.get("range_km_per_l", 17.90))
+            reserve_l = float(vcfg.get("reserve_liters", 5.6))
+            row = c.execute(
+                "SELECT range_km FROM can_readings WHERE range_km IS NOT NULL "
+                "ORDER BY ts DESC LIMIT 1").fetchone()
+            if row and row["range_km"] is not None and row["range_km"] > 0:
+                fuel_range = row["range_km"]
+                fuel_remaining = round(fuel_range / km_per_l + reserve_l, 1)
+        except Exception as e:
+            import sys
+            print(f"[webapp] fuel_remaining error: {e}", file=sys.stderr)
+
     conn.close()
     
     if latest:
@@ -75,6 +95,8 @@ def api_status():
             "intake_temp": latest["intake_temp"],
             "throttle_pos": latest["throttle_pos"],
             "fuel_level": latest["fuel_level"],
+            "fuel_remaining_l": fuel_remaining,
+            "fuel_range_km": fuel_range,
             "voltage": latest["voltage"],
             "maf": latest["maf"],
             "map": latest["map"],
@@ -411,15 +433,16 @@ def api_refuel_manual():
     conn = get_db()
     c = conn.cursor()
     # ts único para el repostaje manual (no choca con detecciones GPS)
+    # FIX 2026-08-22: round(...,1) convertía 9.98 L en 10.0 L → redondear a 2
     c.execute(
         "INSERT INTO refuels (ts, liters, price_per_l, cost, station, full_tank, source) "
         "VALUES (?, ?, ?, ?, ?, ?, 'manual')",
-        (ts, round(float(litros), 1), price, cost, station, full_tank),
+        (ts, round(float(litros), 2), price, cost, station, full_tank),
     )
     conn.commit()
     rid = c.lastrowid
     conn.close()
-    return jsonify({"ok": True, "id": rid, "ts": ts, "liters": round(float(litros), 1),
+    return jsonify({"ok": True, "id": rid, "ts": ts, "liters": round(float(litros), 2),
                     "cost": cost, "price_per_l": price, "station": station})
 
 
