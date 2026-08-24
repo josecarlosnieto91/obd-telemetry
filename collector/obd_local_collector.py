@@ -49,6 +49,8 @@ PIDS = [
     ("rpm", "010C"),
     ("speed", "010D"),
     ("coolant", "0105"),
+    ("engine_load", "0104"),   # FIX 2026-08-24: faltaba de la lista — el C4
+                               # lo expone (los recolectores antiguos lo leían)
     ("throttle", "0111"),
     ("intake", "010F"),
     ("fuel", "012F"),
@@ -102,7 +104,7 @@ def db_connect():
         rpm REAL, speed REAL, coolant REAL, throttle REAL,
         intake REAL, fuel REAL, maf REAL, voltage REAL)""")
     # Columnas diésel (PIDs extendidos, opcionales según soporte del motor)
-    for col in ("map", "ambient", "fuel_pressure", "fuel_rate"):
+    for col in ("map", "ambient", "fuel_pressure", "fuel_rate", "engine_load"):
         try:
             conn.execute(f"ALTER TABLE readings ADD COLUMN {col} REAL")
         except sqlite3.OperationalError:
@@ -177,6 +179,8 @@ def parse_hex_response(resp):
     payload = [int(x, 16) for x in m.group(2).split()]
     if pid == "0C" and len(payload) >= 2:
         return (payload[0] * 256 + payload[1]) / 4.0
+    if pid == "04" and len(payload) >= 1:   # Engine load (%) — FIX 2026-08-24
+        return payload[0] * 100 / 255.0
     if pid == "0D" and len(payload) >= 1:
         return float(payload[0])
     if pid == "05" and len(payload) >= 1:
@@ -478,10 +482,23 @@ def import_can_csv(conn):
             if not line or line.startswith("ts,"):
                 continue
             parts = line.split(",")
+            # CSV normal: ts,cons,range,odom (4 campos)
+            # CSV corrupto por locale: ts,cons,range,odom,extra si la coma
+            # decimal española partió un valor (p.ej. "4,4" → "4","4")
+            # FIX 2026-08-23: el CanSniffer v4.8.2 usaba %.1f con locale
+            # español → "4,4" en vez de "4.4". El APK 4.8.3 ya fuerza
+            # Locale.US; aquí toleramos ambas formas.
             if len(parts) < 4:
                 continue
             try:
-                ts, cons, rng, odom = parts[0], float(parts[1]), float(parts[2]), float(parts[3])
+                ts = parts[0]
+                # Si el primer valor numérico está partido ("4","4"), reconstruir
+                if len(parts) == 5:
+                    # Formato corrupto: ts,cons_ent,cons_dec,range,odom
+                    cons = float(f"{parts[1]}.{parts[2]}")
+                    rng, odom = float(parts[3]), float(parts[4])
+                else:
+                    cons, rng, odom = float(parts[1]), float(parts[2]), float(parts[3])
             except ValueError:
                 continue
             cur = conn.execute(
@@ -771,13 +788,14 @@ def main():
         with conn:
             if reading:
                 conn.execute(
-                    "INSERT OR IGNORE INTO readings VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT OR IGNORE INTO readings VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (ts, reading.get("rpm"), reading.get("speed"),
                      reading.get("coolant"), reading.get("throttle"),
                      reading.get("intake"), reading.get("fuel"),
                      reading.get("maf"), reading.get("voltage"),
                      reading.get("map"), reading.get("ambient"),
-                     reading.get("fuel_pressure"), reading.get("fuel_rate")))
+                     reading.get("fuel_pressure"), reading.get("fuel_rate"),
+                     reading.get("engine_load")))
                 update_calibration(conn, reading)
                 detect_fap_regen(conn, reading, ts)
             if position:

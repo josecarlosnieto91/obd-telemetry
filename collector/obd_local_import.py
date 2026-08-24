@@ -62,6 +62,8 @@ def connect_db(path, wal=True):
         cols = [r[1] for r in conn.execute("PRAGMA table_info(readings)")]
         if "fuel_rate" not in cols:
             conn.execute("ALTER TABLE readings ADD COLUMN fuel_rate REAL")
+        if "engine_load" not in cols:
+            conn.execute("ALTER TABLE readings ADD COLUMN engine_load REAL")
     except sqlite3.OperationalError:
         pass
     # v4.8: tabla can_readings (consumo CAN del decodificador Witson)
@@ -131,10 +133,11 @@ def get_or_create_active_session(conn, start_ts, first_new_ts=None):
 
 def import_readings(conn, local_conn, session_id, ts_min=None, ts_max=None):
     try:
-        # Columnas diésel (map/ambient/fuel_pressure/fuel_rate) pueden no existir
-        # en ficheros antiguos → consulta dinámica según PRAGMA del fichero local
+        # Columnas diésel/dinámicas (map/ambient/fuel_pressure/fuel_rate/
+        # engine_load) pueden no existir en ficheros antiguos → consulta
+        # dinámica según PRAGMA del fichero local
         local_cols = [r[1] for r in local_conn.execute("PRAGMA table_info(readings)")]
-        diesel = [c for c in ("map", "ambient", "fuel_pressure", "fuel_rate")
+        diesel = [c for c in ("map", "ambient", "fuel_pressure", "fuel_rate", "engine_load")
                   if c in local_cols]
         sel = "timestamp, rpm, speed, coolant, throttle, intake, fuel, maf, voltage"
         if diesel:
@@ -166,11 +169,11 @@ def import_readings(conn, local_conn, session_id, ts_min=None, ts_max=None):
         conn.execute(
             "INSERT INTO readings (session_id, timestamp, rpm, speed, coolant_temp, "
             "throttle_pos, intake_temp, fuel_level, maf, voltage, map, ambient, "
-            "fuel_pressure, fuel_rate) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "fuel_pressure, fuel_rate, engine_load) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (session_id, ts, rpm, speed, coolant, throttle, intake, fuel, maf, voltage,
              dmap.get("map"), dmap.get("ambient"), dmap.get("fuel_pressure"),
-             dmap.get("fuel_rate")))
+             dmap.get("fuel_rate"), dmap.get("engine_load")))
         existing.add(ts)
         inserted += 1
     return inserted
