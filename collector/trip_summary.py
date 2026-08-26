@@ -402,7 +402,8 @@ def main():
             lines.append(f"⛽ {tag} {cons_medio:.1f} l/100km (~{litros:.1f} L)")
         # Combustible restante estimado desde el rango CAN (si hay datos)
         try:
-            vcfg = (load_config().get("vehicle", {}) or {})
+            with open(CONFIG_PATH) as fh:
+                vcfg = json.load(fh).get("vehicle", {}) or {}
             km_per_l = float(vcfg.get("range_km_per_l", 17.90))
             reserve_l = float(vcfg.get("reserve_liters", 5.6))
             last_range = conn.execute(
