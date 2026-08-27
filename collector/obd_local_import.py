@@ -287,11 +287,19 @@ def import_dtcs(conn, local_conn, session_id):
         if not desc:
             desc = descs.get(code, "")
         exists = conn.execute(
-            "SELECT id FROM dtc WHERE code=? LIMIT 1", (code,)).fetchone()
+            "SELECT id, cleared FROM dtc WHERE code=? LIMIT 1", (code,)).fetchone()
         if exists:
+            # FIX 2026-08-26: NO pisar cleared si el usuario lo borró manualmente
+            # (cleared=1). Antes: UPDATE ... cleared=? reseteaba a 0 en cada
+            # sync → los DTCs borrados "volvían" siempre. Ahora solo se fuerza
+            # cleared=1 para códigos ignorados; si ya estaba borrado, se
+            # preserva; si no, se deja como estaba (0).
+            new_cleared = exists[1]
+            if cleared and not exists[1]:
+                new_cleared = 1  # ignorado por config → ocultar
             conn.execute(
                 "UPDATE dtc SET timestamp=?, description=?, cleared=? WHERE id=?",
-                (ts, desc or "", cleared, exists[0]))
+                (ts, desc or "", new_cleared, exists[0]))
             updated += 1
         else:
             conn.execute(

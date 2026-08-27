@@ -243,6 +243,26 @@ def api_dtcs_clear():
     return jsonify({"success": True, "cleared": codes or "all"})
 
 
+@app.route("/api/dtcs")
+def api_dtcs():
+    """Histórico completo de DTCs: código, descripción, estado (activo/borrado),
+    primera/última vez visto y viajes asociados."""
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("""
+        SELECT code, description, cleared,
+               MIN(timestamp) AS first_seen, MAX(timestamp) AS last_seen,
+               COUNT(*) AS sightings,
+               GROUP_CONCAT(DISTINCT session_id) AS session_ids
+        FROM dtc
+        GROUP BY code
+        ORDER BY last_seen DESC
+    """)
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return jsonify(rows)
+
+
 @app.route("/api/stats")
 def api_stats():
     """Overall statistics"""
@@ -351,6 +371,11 @@ def trips():
 @app.route("/alerts")
 def alerts():
     return render_template("alerts.html")
+
+
+@app.route("/dtcs")
+def dtcs():
+    return render_template("dtcs.html")
 
 
 @app.route("/maintenance")

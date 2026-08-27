@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}DTCs — OBD Telemetry{% endblock %}
+
+{% block content %}
+<div class="page">
+    <h1>🔧 Códigos de error (DTC)</h1>
+    <p class="subtitle">Histórico completo. Los códigos <b>activos</b> son los que se están viendo ahora;
+        los <b>borrados</b> se marcaron para verificar tras mantenimiento (si reaparecen, el fallo sigue).</p>
+    <div id="dtc-container">
+        <p class="muted">Cargando...</p>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function loadDtcs() {
+    const el = document.getElementById('dtc-container');
+    try {
+        const r = await fetch('/api/dtcs');
+        const rows = await r.json();
+        if (!rows.length) {
+            el.innerHTML = '<p class="muted">Sin códigos registrados.</p>';
+            return;
+        }
+        const cards = rows.map(d => {
+            const activo = !d.cleared;
+            const last = d.last_seen ? new Date(d.last_seen).toLocaleString('es') : '—';
+            const first = d.first_seen ? new Date(d.first_seen).toLocaleDateString('es') : '—';
+            return `<div class="card ${activo ? 'danger' : ''}" style="margin-bottom:10px;">
+                <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+                    <div>
+                        <strong style="font-size:1.1em;">${d.code}</strong>
+                        <span style="margin-left:8px;">${activo ? '🟥 Activo' : '✅ Borrado'}</span>
+                    </div>
+                    <button class="btn" style="font-size:12px;padding:3px 8px;" onclick="clearDtc('${d.code}', this)">🗑 Marcar borrado</button>
+                </div>
+                <p style="margin:6px 0 2px;">${d.description || '<span class="muted">Sin descripción</span>'}</p>
+                <p class="muted" style="font-size:0.8em;">Visto ${d.sightings}× · primero ${first} · último ${last}${d.session_ids ? ` · viajes: ${d.session_ids}` : ''}</p>
+            </div>`;
+        }).join('');
+        el.innerHTML = cards;
+    } catch(e) {
+        el.innerHTML = '<p class="muted">Error cargando DTCs.</p>';
+    }
+}
+
+async function clearDtc(code, btn) {
+    if (!confirm(`¿Marcar ${code} como borrado? No se elimina del histórico — sirve para verificar tras el mantenimiento.`)) return;
+    const r = await fetch('/api/dtcs/clear', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({codes: [code]})
+    });
+    const j = await r.json();
+    if (j.success) {
+        loadDtcs();
+    } else {
+        alert('Error al marcar como borrado');
+    }
+}
+
+loadDtcs();
+</script>
+{% endblock %}
