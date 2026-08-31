@@ -47,13 +47,23 @@ def haversine_km(lat1, lon1, lat2, lon2):
 
 
 def position_near(conn, ts, window_min=5):
-    """Posición GPS más cercana en tiempo a ts (ventana ± window_min)."""
+    """Posición GPS más cercana en tiempo a ts (ventana ± window_min).
+    FIX 2026-08-26: antes usaba BETWEEN (ts, ts) = rango CERO → solo
+    encontraba timestamps exactos; además una posición GPS espuria del
+    arranque en frío (22 km en 11 min, imposible) bloqueaba fusiones
+    legítimas. Ahora: ventana real ±window_min; si no hay posiciones
+    fiables devuelve None (la fusión no se bloquea: el gap corto es
+    señal suficiente)."""
     try:
+        from datetime import timedelta
+        t = datetime.fromisoformat(ts)
+        lo = (t - timedelta(minutes=window_min)).isoformat()
+        hi = (t + timedelta(minutes=window_min)).isoformat()
         row = conn.execute(
             "SELECT lat, lon FROM positions "
             "WHERE timestamp BETWEEN ? AND ? "
             "ORDER BY ABS(julianday(timestamp) - julianday(?)) LIMIT 1",
-            (ts, ts, ts)).fetchone()
+            (lo, hi, ts)).fetchone()
     except Exception:
         return None
     if not row:
@@ -91,13 +101,33 @@ def main():
                 continue
             if gap < 0 or gap > gap_min:
                 continue
-            # Geografía: fin de A y inicio de B cerca (si hay posiciones)
-            pa = position_near(conn, a["end_time"])
-            pb = position_near(conn, b["start_time"])
-            if pa and pb:
-                d = haversine_km(pa[0], pa[1], pb[0], pb[1])
-                if d > geo_km:
-                    continue  # lejos: viajes distintos (p.ej. vuelta a casa)
+            # Señal de continuidad: si el GPS no tiene hueco entre el fin de A y
+            # el inicio de B (intervalo < 3 min entre posiciones), el coche NO
+            # se detuvo → mismo viaje (el OBD se interrumpió, no el coche).
+            # FIX 2026-08-26: la comparación geográfica fin/inicio fallaba
+            # cuando el coche avanzaba (posición del fin lejos del inicio
+            # aunque el GPS fuera continuo: 22 km a 120 km/h en 11 min).
+            gps_cont = False
+            try:
+                row = conn.execute(
+                    "SELECT MAX(ROUND((julianday((SELECT MIN(timestamp) FROM positions p2 "
+                    "WHERE p2.timestamp > p.timestamp))-julianday(p.timestamp))*86400,0)) "
+                    "FROM positions p WHERE p.timestamp BETWEEN ? AND ?",
+                    (a["end_time"], b["start_time"])).fetchone()
+                if row and row[0] is not None and float(row[0]) < 180:
+                    gps_cont = True
+            except Exception:
+                gps_cont = False
+            if gps_cont:
+                pass  # mismo viaje: el coche no se detuvo
+            else:
+                # Sin GPS continuo: comprobar geografía fin/inicio
+                pa = position_near(conn, a["end_time"])
+                pb = position_near(conn, b["start_time"])
+                if pa and pb:
+                    d = haversine_km(pa[0], pa[1], pb[0], pb[1])
+                    if d > geo_km:
+                        continue  # lejos: viajes distintos (p.ej. vuelta a casa)
             # Fusión: conservar la sesión más antigua (a), absorber b
             keep, drop = a, b
             n_read = c.execute(
