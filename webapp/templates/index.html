@@ -137,7 +137,7 @@ async function update() {
             gauges.fuel.textContent = d.fuel_level != null ? d.fuel_level + '%' : (d.fuel_remaining_l != null ? '~' + d.fuel_remaining_l + ' L' : '—');
             const fuelUnit = document.getElementById('stat-fuel-unit');
             if (fuelUnit) fuelUnit.textContent = d.fuel_level != null ? '%' : 'L';
-            gauges.load.textContent = d.engine_load ?? '—';
+            gauges.load.textContent = d.engine_load != null ? Math.round(d.engine_load * 10) / 10 + '%' : '—';
             gauges.map.textContent = d.map ?? '—';
 
             // Color indicators
