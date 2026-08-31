@@ -180,17 +180,17 @@ def parse_hex_response(resp):
     if pid == "0C" and len(payload) >= 2:
         return (payload[0] * 256 + payload[1]) / 4.0
     if pid == "04" and len(payload) >= 1:   # Engine load (%) — FIX 2026-08-24
-        return payload[0] * 100 / 255.0
+        return round(payload[0] * 100 / 255.0, 1)   # 1 decimal (FIX 2026-08-31)
     if pid == "0D" and len(payload) >= 1:
         return float(payload[0])
     if pid == "05" and len(payload) >= 1:
         return payload[0] - 40
     if pid == "11" and len(payload) >= 1:
-        return payload[0] * 100 / 255.0
+        return round(payload[0] * 100 / 255.0, 1)   # 1 decimal (FIX 2026-08-31)
     if pid == "0F" and len(payload) >= 1:
         return payload[0] - 40
     if pid == "2F" and len(payload) >= 1:
-        return payload[0] * 100 / 255.0
+        return round(payload[0] * 100 / 255.0, 1)   # 1 decimal (FIX 2026-08-31)
     if pid == "10" and len(payload) >= 2:
         return (payload[0] * 256 + payload[1]) / 100.0
     if pid == "0B" and len(payload) >= 2:   # MAP: presión absoluta admisión (boost)
