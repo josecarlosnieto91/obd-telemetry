@@ -12,8 +12,18 @@ import sys
 from datetime import datetime
 
 # ── Configuration ──────────────────────────────────────────────
-POLAR_HOST = "100.64.0.1"   # Tailscale IP
-POLAR_PORT = 22000
+# ── Configuración: host/puerto del puente OBD ──────────────────
+# Se leen de ~/.hermes/config/polar_star.json. Nada de IPs ni dominios
+# hardcodeados: este repo es público. El fallback es el nombre MagicDNS corto.
+def _obd_cfg():
+    try:
+        with open(os.path.expanduser("~/.hermes/config/polar_star.json")) as f:
+            obd = json.load(f)["obd"]
+        return obd["host"], int(obd["port"])
+    except Exception:
+        return os.environ.get("OBD_HOST", "polar-star"), int(os.environ.get("OBD_PORT", "22000"))
+
+POLAR_HOST, POLAR_PORT = _obd_cfg()
 DB_PATH = os.path.expanduser("~/.hermes/data/obd_telemetry.db")
 DATA_DIR = os.path.expanduser("~/.hermes/data")
 PID_INTERVAL = 2  # seconds between PID reads (don't flood the ELM327)

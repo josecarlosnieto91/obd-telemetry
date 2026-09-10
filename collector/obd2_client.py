@@ -3,13 +3,24 @@
 OBD2 Client for VgateBridge TCP tunnel.
 Connects to vehicle tablet's VgateBridge TCP server and reads OBD2 data.
 """
+import json
 import socket
 import obd
 import sys
 import time
 
-POLAR_STAR_HOST = "100.100.19.98"  # Tailscale IP
-POLAR_STAR_PORT = 22000
+# ── Configuración: host/puerto del puente OBD ──────────────────
+# Se leen de ~/.hermes/config/polar_star.json. Nada de IPs ni dominios
+# hardcodeados: este repo es público. El fallback es el nombre MagicDNS corto.
+def _obd_cfg():
+    try:
+        with open(os.path.expanduser("~/.hermes/config/polar_star.json")) as f:
+            obd = json.load(f)["obd"]
+        return obd["host"], int(obd["port"])
+    except Exception:
+        return os.environ.get("OBD_HOST", "polar-star"), int(os.environ.get("OBD_PORT", "22000"))
+
+POLAR_STAR_HOST, POLAR_STAR_PORT = _obd_cfg()
 
 class TcpSerial:
     """Wraps a TCP socket as a serial-like object for python-obd."""

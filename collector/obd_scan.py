@@ -15,8 +15,20 @@ Uso: python3 obd_scan.py [host] [port]
 """
 import socket, time, sys, json, os, re, datetime
 
-HOST = sys.argv[1] if len(sys.argv) > 1 else "100.64.0.1"
-PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 22000
+# ── Configuración: host/puerto del puente OBD ──────────────────
+# Se leen de ~/.hermes/config/polar_star.json. Nada de IPs ni dominios
+# hardcodeados: este repo es público. El fallback es el nombre MagicDNS corto.
+def _obd_cfg():
+    try:
+        with open(os.path.expanduser("~/.hermes/config/polar_star.json")) as f:
+            obd = json.load(f)["obd"]
+        return obd["host"], int(obd["port"])
+    except Exception:
+        return os.environ.get("OBD_HOST", "polar-star"), int(os.environ.get("OBD_PORT", "22000"))
+
+_DEF_HOST, _DEF_PORT = _obd_cfg()
+HOST = sys.argv[1] if len(sys.argv) > 1 else _DEF_HOST
+PORT = int(sys.argv[2]) if len(sys.argv) > 2 else _DEF_PORT
 OUT = os.path.expanduser("~/.hermes/data/obd_scan.json")
 
 # PIDs Mode 01 estándar con nombre y decodificación

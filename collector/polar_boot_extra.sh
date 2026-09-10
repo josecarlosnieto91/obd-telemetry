@@ -83,7 +83,9 @@ start_local_collector
 #    roban el foco al usuario (Maps/Spotify quedan al frente).
 TS_FLAG=~/.tailscale_retry_ts
 TS_ONCE=~/.tailscale_launched_once
-TS_PEER=100.64.0.1   # server — si responde, la VPN Tailscale está up
+# Peer a comprobar = coordinador de Tailscale (IP de servicio pública, no un
+# dispositivo): si responde, la VPN está up. Override con TS_PEER si hiciera falta.
+TS_PEER="${TS_PEER:-100.64.0.1}"
 TS_INTERNET=1.1.1.1      # referencia de conectividad general
 
 tailscale_connected() {

@@ -6,3 +6,5 @@ __pycache__/
 *.db-shm
 .env
 .DS_Store
+# Config real del vehículo: solo la plantilla (docs/*.example.json) va al repo
+collector/obd_vehicle_config.json
