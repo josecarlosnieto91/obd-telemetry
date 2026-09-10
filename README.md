@@ -181,6 +181,23 @@ refuel_gps_detector.py cada 10 min  (detecta repostajes)
 car_status.py          cada 15 min  (diagnósticos + alertas)
 ```
 
+> **Los crons ejecutan estos scripts DESDE este repo**, no desde una copia. El cron de Hermes
+> sólo admite scripts dentro de `~/.hermes/scripts/` (rechaza rutas absolutas y symlinks), así
+> que ahí viven unos **wrappers `.sh` de 6 líneas** que hacen `exec` del fichero del repo:
+>
+> ```bash
+> # ~/.hermes/scripts/trip_summary.sh
+> exec "$HOME/.hermes/hermes-agent/venv/bin/python3" "$HOME/repos/obd-telemetry/collector/trip_summary.py" "$@"
+> ```
+>
+> **Editar siempre `collector/`, nunca el wrapper**: el cambio entra en el siguiente tick, sin
+> redesplegar. Estos scripts usan el intérprete de la venv de Hermes (necesita `requests`).
+>
+> Lo que **no** se versiona aquí: `obd_vehicle_config.json` con los datos reales del vehículo
+> (este repo es público; se despliega el `docs/obd_vehicle_config.example.json` como plantilla)
+> y la base de datos. La config de instalación vive en `~/.hermes/scripts/`. El `app.py` los
+> busca por ruta absoluta, por eso el código puede estar en otro sitio.
+
 ### 3. Tablet (vehicle tablet)
 
 **Instalar desde F-Droid** (no Play Store):
