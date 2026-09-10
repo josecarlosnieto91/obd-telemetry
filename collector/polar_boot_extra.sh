@@ -56,7 +56,9 @@ start_watchdog
 
 # 5b. Recolector OBD local — fuente primaria de datos SIN Internet.
 #     (Añadido 2026-08-03: se moría tras cada arranque y NADIE lo relanzaba
-#     → la webapp se quedaba sin datos. El crond lo mantiene vivo ahora.)
+#     → la webapp se quedaba sin datos. El crond lo mantiene vivo ahora.
+#     ⚠️ 2026-08-09: se perdió al desplegar desde el repo anonimizado — el
+#     repo no tenía esta sección. Restaurada en ambos sitios.)
 start_local_collector() {
     if ! pgrep -f "obd_local_collector.py" > /dev/null 2>&1; then
         if [ -f ~/obd_local_collector.py ]; then
@@ -73,7 +75,14 @@ start_local_collector
 #    conectividad. Este refuerzo cubre el caso de que la ROM mate el proceso
 #    de la app durante la espera: si hay red pero la VPN no responde, relanza
 #    Tailscale (con anti-spam de 3 min para no abrir la UI cada minuto).
+#
+#    ⚠️ FIX 2026-08-06: Tailscale solo se abre UNA VEZ por arranque del coche.
+#    El flag ~/.tailscale_launched_once se crea la primera vez que se lanza y
+#    solo se limpia en boot completo (termux-boot.sh). Así, las pérdidas de
+#    conexión posteriores (cambio de red, torre móvil) NO reabren la app y no
+#    roban el foco al usuario (Maps/Spotify quedan al frente).
 TS_FLAG=~/.tailscale_retry_ts
+TS_ONCE=~/.tailscale_launched_once
 TS_PEER=100.64.0.1   # server — si responde, la VPN Tailscale está up
 TS_INTERNET=1.1.1.1      # referencia de conectividad general
 
@@ -87,16 +96,22 @@ has_internet() {
 
 if ! tailscale_connected; then
     if has_internet; then
-        # Hay red pero Tailscale no conecta: relanzar (máx 1 vez cada 3 min)
-        now=$(date +%s)
-        last=0
-        [ -f "$TS_FLAG" ] && last=$(cat "$TS_FLAG" 2>/dev/null || echo 0)
-        if [ $((now - last)) -ge 180 ]; then
-            echo "$now" > "$TS_FLAG"
-            am start -n com.tailscale.ipn/.MainActivity >/dev/null 2>&1
-            sleep 4
-            # Volver al launcher del coche (no robar foco)
-            am start -a android.intent.action.MAIN -c android.intent.category.HOME >/dev/null 2>&1
+        if [ ! -f "$TS_ONCE" ]; then
+            # Primera vez en este arranque: abrir Tailscale y marcar.
+            # A partir de aquí, aunque la VPN se caiga, NO se reabre.
+            echo "$(date +%s)" > "$TS_ONCE"
+            now=$(date +%s)
+            last=0
+            [ -f "$TS_FLAG" ] && last=$(cat "$TS_FLAG" 2>/dev/null || echo 0)
+            if [ $((now - last)) -ge 180 ]; then
+                echo "$now" > "$TS_FLAG"
+                am start -n com.tailscale.ipn/.MainActivity >/dev/null 2>&1
+                sleep 4
+                # Volver a la app anterior (no abrir el launcher): pedir a
+                # MainActivity que haga moveTaskToBack con EXTRA_GO_BACK.
+                am start -n com.cassiopeia.vgatebridge/.MainActivity \
+                    --ez go_back true >/dev/null 2>&1
+            fi
         fi
     fi
 else
