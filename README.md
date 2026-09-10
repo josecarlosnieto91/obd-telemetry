@@ -136,21 +136,23 @@ remoto se configura en `obd_local_collector.py` (constantes `CASSIOPEIA` /
 git clone git@github-obd-telemetry:josecarlosnieto91/obd-telemetry.git ~/repos/obd-telemetry
 mkdir -p ~/.hermes/scripts ~/.hermes/data/incoming/processed ~/.hermes/data/tracks
 cp -r collector/*.py collector/*.sh ~/.hermes/scripts/
-cp -r webapp ~/.hermes/obd_webapp
 cp docs/obd_vehicle_config.example.json ~/.hermes/scripts/obd_vehicle_config.json
 # editar el config con los datos del vehículo real
 
-# Webapp como servicio systemd user
+# Webapp como servicio systemd user — corre DESDE el repo (una sola copia)
 cat > ~/.config/systemd/user/obd-webapp.service <<'EOF'
 [Unit]
-Description=OBD Telemetry WebApp
+Description=OBD Telemetry WebApp (Polar Star dashboard)
 After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/.hermes/obd_webapp
-ExecStart=/usr/bin/python3 %h/.hermes/obd_webapp/app.py
+WorkingDirectory=%h/repos/obd-telemetry/webapp
+ExecStart=/usr/bin/python3 %h/repos/obd-telemetry/webapp/app.py
 Restart=on-failure
+RestartSec=5
+Environment=OBD_WEB_PORT=8765
 
 [Install]
 WantedBy=default.target
@@ -158,6 +160,18 @@ EOF
 systemctl --user daemon-reload
 systemctl --user enable --now obd-webapp
 ```
+
+> **El código vive en `~/repos/`, no en el workspace del agente.** Hasta el
+> 2026-09-10 este despliegue copiaba `webapp/` a `~/.hermes/obd_webapp` y el
+> servicio corría desde la copia: repo y desplegado divergían (mismo `app.py`
+> duplicado, había que parchear los dos, y una nota en el skill advertía de
+> ello). Ahora el servicio corre **desde el repo**: editar, commit y
+> `systemctl --user restart obd-webapp`.
+>
+> Los **datos** no se mueven: `~/.hermes/data/obd_telemetry.db` y
+> `~/.hermes/data/tracks/`. El `app.py` los referencia con rutas absolutas
+> (`os.path.expanduser`), por eso el código puede vivir en otra ruta sin tocar
+> la base de datos.
 
 ### 2. Crons (Hermes o cron del sistema)
 ```
