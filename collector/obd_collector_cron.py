@@ -186,7 +186,7 @@ def main():
     #    Internet): si hay fichero entrante, merge en la BD antes del TCP live.
     try:
         sp.run([sys.executable,
-                os.path.expanduser("~/.hermes/scripts/obd_local_import.py")],
+                os.path.expanduser("~/repos/obd-telemetry/collector/obd_local_import.py")],
                timeout=30)
     except Exception:
         pass  # el import falla silenciosamente si no hay datos o está ocupado
