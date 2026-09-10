@@ -75,6 +75,57 @@ out center tags;"""
         return None, None
 
 
+def is_real_stop(conn, session_id):
+    """Exige parada REAL antes de reportar repostaje GPS (fix 2026-08-31).
+
+    El radio de 200 m por sí solo genera falsos positivos (aparcar cerca de
+    una gasolinera sin repostar). Patrón observado en datos reales:
+      - Parada real (sesiones 60-105): últimas 4 posiciones agrupadas
+        (<100 m entre sí) y velocidad <5 km/h en la mayoría.
+      - Falso positivo (sesión 125): el GPS corta al apagar el motor, las
+        últimas lecturas muestran 6-14 km/h y cientos de metros de recorrido.
+
+    Criterio: desplazamiento máximo entre las 4 últimas posiciones < 100 m
+    Y al menos 3 de 4 lecturas con gps_speed < 5 km/h.
+    """
+    try:
+        c = conn.cursor()
+        c.execute(
+            """SELECT timestamp, lat, lon, gps_speed
+               FROM positions
+               WHERE session_id = ?
+               ORDER BY timestamp DESC LIMIT 4""",
+            (session_id,),
+        )
+        rows = [dict(r) for r in c.fetchall()]
+    except sqlite3.Error as e:
+        sys.stderr.write(f"stop check fail: {e}\n")
+        return False
+
+    if len(rows) < 4:
+        return False
+
+    # 1) Desplazamiento máximo entre las 4 últimas posiciones < 100 m
+    coords = [(r["lat"], r["lon"]) for r in rows if r["lat"] is not None and r["lon"] is not None]
+    if len(coords) < 4:
+        return False
+    dmax = 0.0
+    for i in range(len(coords)):
+        for j in range(i + 1, len(coords)):
+            d = haversine(coords[i][0], coords[i][1], coords[j][0], coords[j][1])
+            if d > dmax:
+                dmax = d
+    if dmax >= 100:
+        return False
+
+    # 2) Al menos 3 de 4 lecturas con velocidad < 5 km/h
+    speeds = [r.get("gps_speed") for r in rows if r.get("gps_speed") is not None]
+    if len(speeds) < 3:
+        return False
+    slow = sum(1 for s in speeds if s < 5.0)
+    return slow >= 3
+
+
 def main():
     conn = sqlite3.connect(OBD_DB, timeout=10.0)
     conn.execute("PRAGMA busy_timeout=10000")
@@ -126,6 +177,11 @@ def main():
     reports = []
     for t in trips:
         if t["lat"] is None or t["lon"] is None:
+            continue
+        # FIX 2026-08-31: exigir parada real (3+ lecturas <2 km/h) antes de
+        # reportar. El radio de 200 m solo no basta — aparcar cerca de una
+        # gasolinera sin repostar generaba falsos positivos.
+        if not is_real_stop(conn, t["id"]):
             continue
         name, dist = find_fuel_station(t["lat"], t["lon"])
         if not name:

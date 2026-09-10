@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-OBD2 Collector (cron mode) — connects to vehicle tablet's VgateBridge,
+OBD2 Collector (cron mode) — connects to Polar Star's VgateBridge,
 collects one batch of readings + GPS position, stores in SQLite.
 """
 import socket
@@ -14,8 +14,13 @@ import subprocess as sp
 from datetime import datetime
 
 # ── Configuration ──
-POLAR_HOST = "100.64.0.1"
-POLAR_PORT = 22000
+import json as _json
+def _load_cfg():
+    with open(os.path.expanduser("~/.hermes/config/polar_star.json")) as f:
+        return _json.load(f)
+
+POLAR_HOST = _load_cfg()["obd"]["host"]
+POLAR_PORT = _load_cfg()["obd"]["port"]
 DB_PATH = os.path.expanduser("~/.hermes/data/obd_telemetry.db")
 DATA_DIR = os.path.expanduser("~/.hermes/data")
 PID_INTERVAL = 2
@@ -56,8 +61,8 @@ def read_pid(sock, pid):
 
 
 def get_gps():
-    """Get GPS position from vehicle tablet via SSH termux-location"""
-    SSH_HOST = "vehicle-tablet"  # Use alias from ~/.ssh/config
+    """Get GPS position from Polar Star via SSH termux-location"""
+    SSH_HOST = "polar-star"  # Use alias from ~/.ssh/config
     try:
         # Try passive first (instant, returns last known)
         result = sp.run(
@@ -177,7 +182,7 @@ def init_db():
 
 
 def main():
-    # 0. Importar datos locales de vehicle tablet (recopilación autónoma sin
+    # 0. Importar datos locales de Polar Star (recopilación autónoma sin
     #    Internet): si hay fichero entrante, merge en la BD antes del TCP live.
     try:
         sp.run([sys.executable,
@@ -189,7 +194,7 @@ def main():
     conn = init_db()
     c = conn.cursor()
 
-    # Check vehicle tablet reachable via TCP
+    # Check Polar Star reachable via TCP
     try:
         sock = socket.create_connection((POLAR_HOST, POLAR_PORT), timeout=6)
     except Exception as e:

@@ -100,7 +100,7 @@ def reverse_geocode(lat, lon):
             "zoom": 12, "accept-language": "es",
         })
         req = urllib.request.Request(url, headers={
-            "User-Agent": "PolarStar-Telemetry/1.0 (personal vehicle tracker; REDACTED)",
+            "User-Agent": "VehicleTelemetry/1.0 (personal vehicle tracker)",
         })
         with urllib.request.urlopen(req, timeout=6) as r:
             data = json.loads(r.read().decode())
