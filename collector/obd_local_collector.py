@@ -541,8 +541,16 @@ def sync_to_cassiopeia():
              "-o", "StrictHostKeyChecking=no", "-i", SSH_KEY,
              tmp_db, f"{CASSIOPEIA}:{INCOMING_PATH}"],
             capture_output=True, text=True, timeout=20)
+        if result.returncode != 0:
+            # BUG FIX 2026-09-11: el fallo de sync era totalmente silencioso
+            # (la tablet estuvo 3 días sin subir datos y el log no decía nada).
+            # Sin esto, un fallo de red/Tailscale pasa inadvertido hasta que
+            # alguien nota que faltan viajes en Cassiopeia.
+            err = " ".join((result.stderr or "").split())[:160]
+            log(f"Sync FALLÓ (rc={result.returncode}): {err}")
         return result.returncode == 0
-    except Exception:
+    except Exception as e:
+        log(f"Sync FALLÓ (excepción): {type(e).__name__}: {e}")
         return False
     finally:
         try:

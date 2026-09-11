@@ -450,19 +450,39 @@ def main():
             session_id = None
             n_read = 0
             n_pos = 0
+            last_valid_session = None
             for (bmin, bmax) in blocks:
+                creada_aqui = False
                 if session_id is None:
                     # Primer bloque: reutiliza la sesión activa si el hueco es
                     # pequeño (viaje en curso) o crea una limpia.
+                    prev_max = target_conn.execute(
+                        "SELECT IFNULL(MAX(id),0) FROM sessions").fetchone()[0]
                     session_id = get_or_create_active_session(target_conn, bmin, bmin)
+                    creada_aqui = session_id > prev_max
                 else:
                     # Bloques siguientes: SIEMPRE sesión nueva (viaje distinto)
                     cur = target_conn.execute(
                         "INSERT INTO sessions (start_time, status) VALUES (?, 'active')",
                         (bmin,))
                     session_id = cur.lastrowid
-                n_read += import_readings(target_conn, local_conn, session_id, bmin, bmax)
-                n_pos += import_positions(target_conn, local_conn, session_id, bmin, bmax)
+                    creada_aqui = True
+                r = import_readings(target_conn, local_conn, session_id, bmin, bmax)
+                p = import_positions(target_conn, local_conn, session_id, bmin, bmax)
+                if creada_aqui and r == 0 and p == 0:
+                    # BUG FIX 2026-09-11: bloque sin datos nuevos (fichero local
+                    # con duplicados / rango ya importado) → la sesión quedaría
+                    # vacía y ensuciaría el historial con viajes fantasma de 0 km
+                    # (se veían como pares idénticos: 152/160, 153/161...).
+                    # Se borra y se sigue con el siguiente bloque.
+                    target_conn.execute("DELETE FROM sessions WHERE id=?", (session_id,))
+                    session_id = None
+                    continue
+                last_valid_session = session_id
+                n_read += r
+                n_pos += p
+            if last_valid_session is not None:
+                session_id = last_valid_session
 
         n_dtc = import_dtcs(target_conn, local_conn, session_id or 0)
         n_fap = import_fap_events(target_conn, local_conn)
