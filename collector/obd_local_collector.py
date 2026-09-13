@@ -42,6 +42,10 @@ SSH_KEY = os.path.join(HOME, ".ssh", "id_ed25519")
 
 INTERVAL = 30            # segundos entre ciclos
 SYNC_EVERY = 20           # sync cada N ciclos (~10 min con INTERVAL=30)
+# El snapshot completo son ~3.7 MB y el enlace Tailscale tarda ~25 s: con un
+# timeout de 20 s el scp se cortaba a medias (dejaba un SQLite truncado en
+# destino → "database disk image is malformed"). 90 s da margen de sobra.
+SYNC_TIMEOUT = 90
 GPS_TIMEOUT = 8
 BRIDGE_TIMEOUT = 6
 
@@ -546,11 +550,17 @@ def sync_to_cassiopeia():
                 dst.close()
         finally:
             src.close()
+        # Subida EN DOS FASES (fix 2026-09-13): primero a un nombre .part y
+        # luego rename atómico en destino. Antes, un scp cortado por timeout
+        # dejaba un SQLite truncado en INCOMING_PATH → el importador lo movía a
+        # corrupt/ con "database disk image is malformed" (pasaba de verdad: el
+        # enlace tarda ~25 s y el timeout era de 20 s). El importador solo mira
+        # INCOMING_PATH, así que un .part nunca le parece un fichero válido.
         result = subprocess.run(
-            ["scp", "-o", "ConnectTimeout=6", "-o", "BatchMode=yes",
+            ["scp", "-o", "ConnectTimeout=10", "-o", "BatchMode=yes",
              "-o", "StrictHostKeyChecking=no", "-i", SSH_KEY,
-             tmp_db, f"{CASSIOPEIA}:{INCOMING_PATH}"],
-            capture_output=True, text=True, timeout=20)
+             tmp_db, f"{CASSIOPEIA}:{INCOMING_PATH}.part"],
+            capture_output=True, text=True, timeout=SYNC_TIMEOUT)
         if result.returncode != 0:
             # BUG FIX 2026-09-11: el fallo de sync era totalmente silencioso
             # (la tablet estuvo 3 días sin subir datos y el log no decía nada).
@@ -558,7 +568,19 @@ def sync_to_cassiopeia():
             # alguien nota que faltan viajes en Cassiopeia.
             err = " ".join((result.stderr or "").split())[:160]
             log(f"Sync FALLÓ (rc={result.returncode}): {err}")
-        return result.returncode == 0
+            return False
+
+        # Rename atómico en el mismo sistema de ficheros del destino.
+        mv = subprocess.run(
+            ["ssh", "-o", "ConnectTimeout=10", "-o", "BatchMode=yes",
+             "-o", "StrictHostKeyChecking=no", "-i", SSH_KEY, CASSIOPEIA,
+             f"mv -f {INCOMING_PATH}.part {INCOMING_PATH}"],
+            capture_output=True, text=True, timeout=30)
+        if mv.returncode != 0:
+            err = " ".join((mv.stderr or "").split())[:160]
+            log(f"Sync FALLÓ (rename rc={mv.returncode}): {err}")
+            return False
+        return True
     except Exception as e:
         log(f"Sync FALLÓ (excepción): {type(e).__name__}: {e}")
         return False
