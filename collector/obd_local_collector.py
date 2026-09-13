@@ -193,8 +193,13 @@ def parse_hex_response(resp):
         return round(payload[0] * 100 / 255.0, 1)   # 1 decimal (FIX 2026-08-31)
     if pid == "10" and len(payload) >= 2:
         return (payload[0] * 256 + payload[1]) / 100.0
-    if pid == "0B" and len(payload) >= 2:   # MAP: presión absoluta admisión (boost)
-        return round(payload[0] * 256 + payload[1], 1)  # kPa
+    if pid == "0B" and len(payload) >= 1:   # MAP: presión absoluta admisión
+        # SAE J1979: MAP = A (kPa, **1 byte**). El ELM327 daba "41 0B 65"
+        # (101 kPa) y aquí se exigían 2 bytes → devolvía None SIEMPRE
+        # (0 valores de 3.873 lecturas). Fix 2026-09-13.
+        if len(payload) >= 2:
+            return round(payload[0] * 256 + payload[1], 1)
+        return round(float(payload[0]), 1)
     if pid == "46" and len(payload) >= 1:   # Ambient air temp
         return payload[0] - 40
     if pid == "23" and len(payload) >= 2:   # Fuel rail pressure
@@ -410,8 +415,13 @@ def read_bridge(with_dtcs=False, supported=None):
             if voltage is not None:
                 reading["voltage"] = voltage
 
-        # 3. PIDs base (sin warm-up: el socket ya está sincronizado)
+        # 3. PIDs base: solo los que el motor expone según el escaneo. Pedir
+        #    uno no soportado cuesta la espera completa del ELM327 (~1-3 s) y
+        #    devuelve None igualmente (0111/012F/015E en el C4 → ~5 s por
+        #    ciclo tirados). Si aún no hay escaneo, se piden todos.
         for name, cmd in PIDS:
+            if supported and cmd[2:] not in supported:
+                continue
             resp = read_pid(sock, cmd, timeout=5)
             value = parse_hex_response(resp)
             if value is not None:
@@ -766,10 +776,12 @@ def main():
         if (not supported and counter % 2 == 0) or (counter > 0 and counter % 360 == 0):
             supported = do_pid_scan()
             if supported:
+                omitidos = [n for n, c in PIDS if c[2:] not in supported]
                 log(f"PID scan: {len(supported)} soportados, "
                     f"diésel={'map' if '0B' in supported else '-'}/"
                     f"{'ambient' if '46' in supported else '-'}/"
-                    f"{'fuel' if '23' in supported else '-'}")
+                    f"{'fuel' if '23' in supported else '-'}"
+                    + (f" · no soportados: {','.join(omitidos)}" if omitidos else ""))
         bridge = read_bridge(with_dtcs=with_dtcs, supported=supported)
         reading = bridge["reading"] if bridge else None
         dtcs = bridge.get("dtcs") if bridge else None
