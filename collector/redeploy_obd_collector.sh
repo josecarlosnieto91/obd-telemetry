@@ -8,9 +8,19 @@
 # en ≤1 min con la versión nueva.
 #
 # Cron: no_agent cada 5 min (stdout vacío = silencio).
+#
+# Gate rápido (fix 2026-09-14): antes de SSH, comprobar tailscale status
+# (~0.01s). Evita ~25-30s de timeouts SSH cada 5 min contra una tablet apagada
+# (estado normal del coche parado) y el spam del log "red caída".
 
 SCRIPT_SRC="$HOME/repos/obd-telemetry/collector/obd_local_collector.py"
 LOG="/home/josecnr91/.hermes/logs/redeploy_obd.log"
+
+# ¿Tablet online en tailscale? Si no aparece o está "offline", no intentar SSH.
+ts_line="$(tailscale status 2>/dev/null | grep 'polar-star' || true)"
+if [ -z "$ts_line" ] || echo "$ts_line" | grep -q 'offline'; then
+    exit 0  # tablet apagada/no registrada — silencio, sin ensuciar el log
+fi
 
 # ¿Versión definitiva ya desplegada?
 if timeout 15 ssh -o ConnectTimeout=10 -o BatchMode=yes polar-star \
