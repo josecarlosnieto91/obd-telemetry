@@ -13,8 +13,11 @@ from flask import Flask, render_template, jsonify, request
 app = Flask(__name__)
 DB_PATH = os.path.expanduser("~/.hermes/data/obd_telemetry.db")
 
-# car_status.py vive en ~/.hermes/scripts — reutilizamos sus funciones
-sys.path.insert(0, os.path.expanduser("~/.hermes/scripts"))
+# car_status.py vive en ../collector (una sola copia en el repo). Antes apuntaba
+# a ~/.hermes/scripts, donde solo queda el wrapper .sh del cron → el servicio
+# arrancaba roto con ModuleNotFoundError (latente desde el refactor del 10/09).
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "collector"))
 import car_status  # noqa: E402
 
 def get_db():

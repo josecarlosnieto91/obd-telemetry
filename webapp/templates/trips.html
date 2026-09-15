@@ -20,6 +20,16 @@
 
 {% block scripts %}
 <script>
+// Fecha compacta (13/09/26, 17:38): con segundos y año completo la columna
+// empujaba la tabla fuera de la pantalla en móvil.
+function fmtDate(ts) {
+    if (!ts) return '—';
+    return new Date(ts).toLocaleString('es-ES', {
+        day: '2-digit', month: '2-digit', year: '2-digit',
+        hour: '2-digit', minute: '2-digit'
+    });
+}
+
 async function loadTrips() {
     const r = await fetch('/api/trips');
     const trips = await r.json();
@@ -30,23 +40,28 @@ async function loadTrips() {
         return;
     }
 
-    let html = '<table><thead><tr><th>Inicio</th><th>Duración</th><th>Distancia</th><th>Vel. max</th><th>Vel. med</th><th>RPM max</th><th>Estado</th><th>Mapa</th></tr></thead><tbody>';
+    // .table-wrap mantiene el scroll horizontal DENTRO de la tarjeta (si no, el
+    // navegador móvil ensancha la página entera y todo se ve diminuto).
+    // Vel. med y RPM max se ocultan en móvil: siguen en el detalle del viaje.
+    let html = '<div class="table-wrap"><table><thead><tr><th>Inicio</th><th>Duración</th><th>Distancia</th><th>Vel. max</th><th class="hide-mobile">Vel. med</th><th class="hide-mobile">RPM max</th><th>Estado</th><th>Mapa</th></tr></thead><tbody>';
     for (const t of trips) {
-        const start = t.start_time ? new Date(t.start_time).toLocaleString('es') : '—';
+        const start = fmtDate(t.start_time);
         const dur = t.driving_minutes ? `${t.driving_minutes} min` : '—';
         const dist = t.distance_km ? `${t.distance_km.toFixed(1)} km` : '—';
         const maxSpd = t.max_speed ? `${t.max_speed.toFixed(0)} km/h` : '—';
         const avgSpd = t.avg_speed ? `${t.avg_speed.toFixed(0)} km/h` : '—';
         const maxRpm = t.max_rpm ? `${t.max_rpm.toFixed(0)} rpm` : '—';
-        const status = t.status === 'active' ? '🟢 Activo' : '✅ Completado';
+        const status = t.status === 'active'
+            ? '🟢<span class="hide-mobile"> Activo</span>'
+            : '✅<span class="hide-mobile"> Completado</span>';
         html += `<tr onclick="showTrip(${t.id})" style="cursor:pointer">
             <td>${start}</td><td>${dur}</td><td>${dist}</td>
-            <td>${maxSpd}</td><td>${avgSpd}</td><td>${maxRpm}</td>
+            <td>${maxSpd}</td><td class="hide-mobile">${avgSpd}</td><td class="hide-mobile">${maxRpm}</td>
             <td>${status}</td>
             <td><a href="/map?session_id=${t.id}" onclick="event.stopPropagation()" title="Ver trazado en el mapa">🗺️</a></td>
         </tr>`;
     }
-    html += '</tbody></table>';
+    html += '</tbody></table></div>';
     el.innerHTML = html;
 }
 
