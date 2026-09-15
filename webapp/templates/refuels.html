@@ -69,7 +69,14 @@ function refuelHTML(r) {
                   : `<span class="muted">—</span> <button class="btn" style="font-size:0.75em;" onclick="setLiters(${r.id}, this)">Litros</button>`;
     const cost = r.cost ? ` · 💶 <b>${r.cost.toFixed(2)} €</b>` : '';
     const price = r.price_per_l ? ` · ${r.price_per_l.toFixed(3)} €/L` : '';
-    const station = r.station ? `<span class="muted" style="font-size:0.8em;"> — ${r.station}</span>` : '';
+    let station = '';
+    if (r.station) {
+        const dist = (r.station_dist_m != null) ? ` <span class="muted">(${Math.round(r.station_dist_m)} m)</span>` : '';
+        const addr = r.station_addr ? `<div class="muted" style="font-size:0.75em;">${r.station_addr}</div>` : '';
+        station = `<span style="font-size:0.85em;">${r.station}${dist}</span>${addr}`;
+    } else if (r.car_lat != null) {
+        station = '<span class="muted" style="font-size:0.8em;">sin gasolinera a &lt;500 m</span>';
+    }
     const src = r.source === 'gps' ? '📍' : '⛽';
     return `<tr>
         <td>${fmtDate(r.ts)} ${src}</td>

@@ -398,7 +398,8 @@ def api_refuels():
     c = conn.cursor()
     c.execute("""
         SELECT r.id, r.ts, r.prev_ts, r.fuel_before, r.fuel_after, r.jump_pct,
-               r.liters, r.full_tank, r.session_id, r.price_per_l, r.cost, r.station, r.source
+               r.liters, r.full_tank, r.session_id, r.price_per_l, r.cost, r.station, r.source,
+               r.station_addr, r.station_dist_m, r.car_lat, r.car_lon
         FROM refuels r ORDER BY r.ts DESC LIMIT 100
     """)
     rows = [dict(row) for row in c.fetchall()]
