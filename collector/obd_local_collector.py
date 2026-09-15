@@ -55,6 +55,11 @@ SYNC_TIMEOUT = 90
 # agua. Se reenvían SYNC_OVERLAP_MIN minutos de solape por si algo se escribió
 # con retraso: el importador dedupea por timestamp, así que repetir es inocuo.
 SYNC_OVERLAP_MIN = 60
+# Series temporales que se suben recortadas por su columna de tiempo...
+SYNC_SERIES = (("readings", "timestamp"), ("positions", "timestamp"),
+               ("can_readings", "ts"))
+# ...y tablas diminutas que van enteras (en destino se hace upsert por clave).
+SYNC_SMALL_TABLES = ("dtc", "calibration", "fap_events")
 GPS_TIMEOUT = 8
 BRIDGE_TIMEOUT = 6
 
@@ -592,13 +597,10 @@ def build_snapshot(since=None):
             except sqlite3.OperationalError:
                 pass  # índice o tabla que ya no aplica
         dst.execute("ATTACH DATABASE ? AS src", (DB_PATH,))
-        # Series temporales: solo lo posterior al corte.
-        for tabla, col in (("readings", "timestamp"), ("positions", "timestamp"),
-                           ("can_readings", "ts")):
+        for tabla, col in SYNC_SERIES:
             dst.execute(f"INSERT INTO main.{tabla} SELECT * FROM src.{tabla} "
                         f"WHERE {col} > ?", (since,))
-        # Tablas pequeñas con upsert por clave en destino: van enteras.
-        for tabla in ("dtc", "calibration", "fap_events"):
+        for tabla in SYNC_SMALL_TABLES:
             try:
                 dst.execute(f"INSERT INTO main.{tabla} SELECT * FROM src.{tabla}")
             except sqlite3.OperationalError:
@@ -615,8 +617,7 @@ def snapshot_max_ts(path):
     conn = sqlite3.connect(path)
     try:
         valores = []
-        for tabla, col in (("readings", "timestamp"), ("positions", "timestamp"),
-                           ("can_readings", "ts")):
+        for tabla, col in SYNC_SERIES:
             try:
                 v = conn.execute(f"SELECT MAX({col}) FROM {tabla}").fetchone()[0]
             except sqlite3.OperationalError:
