@@ -18,6 +18,12 @@ import sqlite3
 import sys
 from datetime import datetime
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import fuel_prices          # caché local de precios oficiales (Ministerio)
+except ImportError:             # el detector sigue funcionando sin precios
+    fuel_prices = None
+
 OBD_DB = os.path.expanduser("~/.hermes/data/obd_telemetry.db")
 CTX_DB = os.path.expanduser("~/.hermes/data/context/context.db")
 CONFIG_PATH = os.path.expanduser("~/.hermes/scripts/obd_vehicle_config.json")
@@ -26,6 +32,7 @@ DEFAULT_CAPACITY = 60.0      # litros — C4 Grand Picasso I (fuente: Motorpasi�
 DEFAULT_KM_PER_L = 21.04     # calibrado con el repostaje real de 2026-08-22
 DEFAULT_MIN_JUMP_KM = 30.0   # salto mínimo de rango (km) para considerarlo repostaje
 DEFAULT_MIN_JUMP_PCT = 8.0   # fallback fuel_level (%)
+POS_WINDOW_MIN = 15          # ventana para buscar la posición GPS del coche
 
 
 def load_config():
@@ -36,27 +43,19 @@ def load_config():
         return {}
 
 
-def get_price_at(lat, lon):
-    """Precio del diésel en la estación más cercana (si hay API configurada)."""
+def get_station(lat, lon, radius_m, product):
+    """Gasolinera más cercana al coche y su precio publicado.
+
+    Usa la caché local del listado oficial (fuel_prices): si no hay caché ni
+    red, devuelve None y el repostaje se registra igual, sin precio.
+    """
+    if fuel_prices is None:
+        return None
     try:
-        cfg = load_config()
-        api = cfg.get("fuel_price_api", {})
-        if not api.get("url"):
-            return None, None
-        import urllib.request
-        url = api["url"].replace("{lat}", str(lat)).replace("{lon}", str(lon))
-        with urllib.request.urlopen(url, timeout=8) as r:
-            data = json.loads(r.read().decode())
-        items = data.get("ListaEESSPrecio", [])
-        if not items:
-            return None, None
-        best = min(items, key=lambda x: float(x.get("PrecioGasoleoA", "999") or 999))
-        p = float(best.get("PrecioGasoleoA", 0))
-        if p <= 0:
-            return None, None
-        return p, best
-    except Exception:
-        return None, None
+        return fuel_prices.nearest_station(lat, lon, radius_m=radius_m, product=product)
+    except Exception as e:
+        sys.stderr.write(f"station lookup fail: {e}\n")
+        return None
 
 
 def main():
@@ -69,6 +68,9 @@ def main():
     min_jump_pct = float(thr.get("refuel_min_jump_pct", DEFAULT_MIN_JUMP_PCT))
     # Rango esperado con depósito lleno (calibrable) — para marcar full_tank
     full_range_km = float(vehicle.get("full_range_km", capacity * km_per_l))
+    # Gasolinera: de qué producto se lee el precio y a qué distancia se acepta
+    price_product = vehicle.get("fuel_price_product", "Gasoleo A")
+    price_radius_m = float(vehicle.get("fuel_price_radius_m", 500.0))
     # NOTA: no sumar reserva al cálculo. El km_per_l está calibrado con el
     # surtidor real (54,35 L → 973 km de salto = 17,90 km/L), así que la
     # reserva (~5,6 L con rango a 0) YA queda absorbida en el factor.
@@ -93,25 +95,35 @@ def main():
         source TEXT DEFAULT 'level',
         UNIQUE(prev_ts, ts)
     )""")
-    for col in ("price_per_l", "cost", "station", "source"):
+    # Columnas añadidas con el tiempo (ALTER idempotente, no borra datos)
+    nuevas = {"price_per_l": "REAL", "cost": "REAL", "station": "TEXT",
+              "source": "TEXT", "station_addr": "TEXT",
+              "station_dist_m": "REAL", "car_lat": "REAL", "car_lon": "REAL"}
+    for col, tipo in nuevas.items():
         try:
-            c.execute(f"ALTER TABLE refuels ADD COLUMN {col} "
-                      + ("TEXT" if col in ("station", "source") else "REAL"))
+            c.execute(f"ALTER TABLE refuels ADD COLUMN {col} {tipo}")
         except sqlite3.OperationalError:
             pass  # ya existe
 
-    def position_near(ts):
+    def position_near(ts, window_min=POS_WINDOW_MIN):
+        """Posición del coche cerca del repostaje (±`window_min`).
+
+        `datetime(timestamp)`: las posiciones guardan ISO con 'T' y las cadenas
+        con 'T' NO comparan con las de `datetime()` (espacio) — el BETWEEN daba
+        cero filas y el repostaje quedaba sin ubicación.
+        """
         try:
             c.execute(
-                "SELECT lat, lon FROM positions "
+                "SELECT lat, lon, timestamp FROM positions "
+                "WHERE datetime(timestamp) BETWEEN datetime(?, ?) AND datetime(?, ?) "
                 "ORDER BY ABS(julianday(timestamp) - julianday(?)) LIMIT 1",
-                (ts,),
+                (ts, f"-{window_min} minutes", ts, f"+{window_min} minutes", ts),
             )
             row = c.fetchone()
             if row and row["lat"] is not None and row["lon"] is not None:
                 return row["lat"], row["lon"]
-        except Exception:
-            pass
+        except Exception as e:
+            sys.stderr.write(f"position lookup fail: {e}\n")
         return None
 
     def insert_refuel(ts, prev_ts, before, after, liters, full, session_id, source):
@@ -132,31 +144,42 @@ def main():
             except Exception:
                 dup = None
             if dup:
-                return 0
-        price, cost, station = None, None, None
+                return None
+        info = {"ts": ts, "prev_ts": prev_ts, "range_before": before,
+                "range_after": after, "liters": round(liters, 1),
+                "full": bool(full), "price": None, "cost": None,
+                "station": None, "addr": None, "dist_m": None,
+                "car_lat": None, "car_lon": None,
+                "radius_m": price_radius_m, "product": price_product}
+        # ¿Dónde estaba el coche? ¿Qué gasolinera había? ¿A qué precio?
         pos = position_near(ts)
         if pos:
-            try:
-                p, s = get_price_at(pos[0], pos[1])
-                if p:
-                    price = round(p, 3)
-                    cost = round(liters * p, 2)
-                    station = f"{s.get('rotulo', '')} · {s.get('municipio', '')}".strip(" ·")
-            except Exception as e:
-                sys.stderr.write(f"fuel price fail: {e}\n")
+            info["car_lat"], info["car_lon"] = pos
+            est = get_station(pos[0], pos[1], price_radius_m, price_product)
+            if est:
+                info["station"] = est["nombre"] or est["municipio"]
+                info["addr"] = ", ".join(
+                    x for x in (est["direccion"], est["municipio"]) if x)
+                info["dist_m"] = est["dist_m"]
+                if est["precio"]:
+                    info["price"] = round(est["precio"], 3)
+                    info["cost"] = round(liters * est["precio"], 2)
         try:
             c.execute(
                 """INSERT OR IGNORE INTO refuels
                    (ts, prev_ts, fuel_before, fuel_after, jump_pct,
-                    liters, full_tank, session_id, price_per_l, cost, station, source)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    liters, full_tank, session_id, price_per_l, cost, station,
+                    source, station_addr, station_dist_m, car_lat, car_lon)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (ts, prev_ts, before, after, round(after - before, 1),
-                 round(liters, 1), 1 if full else 0,
-                 session_id, price, cost, station, source),
+                 round(liters, 1), 1 if full else 0, session_id,
+                 info["price"], info["cost"], info["station"], source,
+                 info["addr"], info["dist_m"], info["car_lat"], info["car_lon"]),
             )
         except sqlite3.Error as e:
             sys.stderr.write(f"refuel insert fail: {e}\n")
-        return c.rowcount
+        info["inserted"] = c.rowcount
+        return info
 
     reports = []
 
@@ -182,12 +205,11 @@ def main():
                         liters = jump_km / km_per_l
                         # Lleno si el rango tras repostar está cerca del máximo
                         full = 1 if r["range_km"] >= full_range_km * 0.8 else 0
-                        n = insert_refuel(r["ts"], prev["ts"],
-                                          prev["range_km"], r["range_km"],
-                                          liters, full, None, "can_range")
-                        if n:
-                            reports.append((r["ts"], prev["range_km"], r["range_km"],
-                                            liters, full, None, None, None))
+                        info = insert_refuel(r["ts"], prev["ts"],
+                                             prev["range_km"], r["range_km"],
+                                             liters, full, None, "can_range")
+                        if info and info["inserted"]:
+                            reports.append(info)
                 prev = r
     except Exception as e:
         sys.stderr.write(f"can range scan fail: {e}\n")
@@ -204,13 +226,11 @@ def main():
                 if jump >= min_jump_pct:
                     liters = jump / 100.0 * capacity
                     full = 1 if r["fuel_level"] >= 90 else 0
-                    n = insert_refuel(r["timestamp"], prev["timestamp"],
-                                      prev["fuel_level"], r["fuel_level"],
-                                      liters, full, r["session_id"], "level")
-                    if n:
-                        reports.append((r["timestamp"], prev["fuel_level"],
-                                        r["fuel_level"], liters, full,
-                                        None, None, None))
+                    info = insert_refuel(r["timestamp"], prev["timestamp"],
+                                         prev["fuel_level"], r["fuel_level"],
+                                         liters, full, r["session_id"], "level")
+                    if info and info["inserted"]:
+                        reports.append(info)
             prev = r
     except Exception:
         pass
@@ -221,19 +241,23 @@ def main():
         try:
             ctx = sqlite3.connect(CTX_DB)
             cc = ctx.cursor()
-            for ts, before, after, liters, full, price, cost, station in reports:
+            for r in reports:
                 detail = json.dumps({
-                    "litros": round(liters, 1),
-                    "rango_antes_km": before, "rango_despues_km": after,
-                    "deposito_lleno": bool(full),
+                    "litros": r["liters"],
+                    "rango_antes_km": r["range_before"],
+                    "rango_despues_km": r["range_after"],
+                    "deposito_lleno": r["full"],
                     "capacidad_l": capacity,
-                    "precio_l": price, "coste": cost, "estacion": station,
+                    "precio_l": r["price"], "coste": r["cost"],
+                    "estacion": r["station"], "direccion": r["addr"],
+                    "dist_estacion_m": r["dist_m"],
+                    "coche_lat": r["car_lat"], "coche_lon": r["car_lon"],
                 }, ensure_ascii=False)
                 try:
                     cc.execute(
                         "INSERT INTO events (ts, ts_unix, type, value, detail) "
                         "VALUES (?,?,?,?,?)",
-                        (ts, int(datetime.fromisoformat(ts).timestamp()),
+                        (r["ts"], int(datetime.fromisoformat(r["ts"]).timestamp()),
                          "vehiculo", "repostaje", detail),
                     )
                 except Exception as e:
@@ -247,17 +271,29 @@ def main():
 
     if reports:
         lines = []
-        for ts, before, after, liters, full, price, cost, station in reports:
-            d = datetime.fromisoformat(ts)
+        for r in reports:
+            d = datetime.fromisoformat(r["ts"])
             block = [
                 f"⛽ Repostaje detectado — {d.strftime('%d/%m %H:%M')}",
-                f"📊 rango {before:.0f} → {after:.0f} km (+{after - before:.0f})",
-                f"🛢️ ~{liters:.1f} L estimados (depósito {capacity:.0f} L)",
+                f"📊 rango {r['range_before']:.0f} → {r['range_after']:.0f} km "
+                f"(+{r['range_after'] - r['range_before']:.0f})",
+                f"🛢️ ~{r['liters']:.1f} L estimados (depósito {capacity:.0f} L)",
             ]
-            if full:
+            if r["full"]:
                 block.append("✅ Depósito lleno")
-            if price and cost:
-                block.append(f"💶 {cost:.2f} € @ {price:.3f} €/L" + (f" — {station}" if station else ""))
+            if r["station"]:
+                donde = f"📍 {r['station']}"
+                if r["addr"]:
+                    donde += f" — {r['addr']}"
+                if r["dist_m"] is not None:
+                    donde += f" (a {r['dist_m']:.0f} m del coche)"
+                block.append(donde)
+            elif r["car_lat"] is not None:
+                block.append(f"📍 ninguna gasolinera a <{r['radius_m']:.0f} m "
+                             f"del coche ({r['car_lat']:.5f}, {r['car_lon']:.5f})")
+            if r["cost"]:
+                block.append(f"💶 {r['cost']:.2f} € @ {r['price']:.3f} €/L "
+                             f"(precio publicado; ajústalo con el surtidor)")
             lines.append("\n".join(block))
         print("\n\n".join(lines))
 
