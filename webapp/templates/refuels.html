@@ -4,10 +4,12 @@
 {% block content %}
 <div class="page">
     <h1>⛽ Historial de Repostajes</h1>
-    <p class="subtitle">Detectados automáticamente cuando el coche se detiene junto a una
-        gasolinera (OpenStreetMap). El precio es el de la estación más cercana ese día
-        (API del Ministerio). El C4 no expone el nivel de combustible por OBD, así que
-        los litros se confirman manualmente.</p>
+    <p class="subtitle">Detectados automáticamente por el <b>salto del rango</b> de combustible
+        que da el coche por CAN: al repostar, el rango sube de golpe. Los litros se estiman
+        con la calibración real del depósito (último llenado: 55,0 L estimados vs 55,03 reales)
+        y se afinan con el ticket. La gasolinera, su dirección y el precio salen del listado
+        oficial del Ministerio según dónde estaba el coche en ese momento; el precio publicado
+        puede llevar algo de retraso respecto al surtidor.</p>
 
     <div class="card">
         <h2>➕ Repostaje manual</h2>
