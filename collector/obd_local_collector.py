@@ -13,6 +13,7 @@ vehículo (~/obd_vehicle_config.json). Todo local.
 Mantenido vivo por polar_boot_extra.sh (crond cada minuto, idempotente).
 Copia maestra: ~/.hermes/scripts/obd_local_collector.py en Cassiopeia.
 """
+import datetime
 import fcntl
 import json
 import os
@@ -28,6 +29,9 @@ HOME = os.environ.get("HOME", "/data/data/com.termux/files/home")
 DATA_DIR = os.path.join(HOME, "obd_data")
 DB_PATH = os.path.join(DATA_DIR, "obd_local.db")
 LOG_PATH = os.path.join(DATA_DIR, "obd_local.log")
+# Marca de agua del sync: último timestamp ya subido. Solo avanza si el sync
+# tuvo éxito, así que un fallo nunca pierde datos (se reenvía en el siguiente).
+WATERMARK_PATH = os.path.join(DATA_DIR, "last_synced_ts")
 CONFIG_PATH = os.path.join(HOME, "obd_vehicle_config.json")
 BRIDGE_HOST = "127.0.0.1"
 BRIDGE_PORT = 22000
@@ -46,6 +50,11 @@ SYNC_EVERY = 20           # sync cada N ciclos (~10 min con INTERVAL=30)
 # timeout de 20 s el scp se cortaba a medias (dejaba un SQLite truncado en
 # destino → "database disk image is malformed"). 90 s da margen de sobra.
 SYNC_TIMEOUT = 90
+# Subida incremental (2026-09-15): en vez de la BD entera cada 10 min (crecía
+# ~0,7 MB/semana y ya tardaba 25 s), se sube solo lo nuevo desde la marca de
+# agua. Se reenvían SYNC_OVERLAP_MIN minutos de solape por si algo se escribió
+# con retraso: el importador dedupea por timestamp, así que repetir es inocuo.
+SYNC_OVERLAP_MIN = 60
 GPS_TIMEOUT = 8
 BRIDGE_TIMEOUT = 6
 
@@ -529,27 +538,112 @@ def import_can_csv(conn):
     return imported
 
 
-def sync_to_cassiopeia():
-    """Sube una copia consistente si hay red. No bloquea la recolección.
+def read_synced_watermark():
+    """Último timestamp ya subido (None si aún no hubo un sync con éxito)."""
+    try:
+        with open(WATERMARK_PATH) as fh:
+            return fh.read().strip() or None
+    except OSError:
+        return None
 
-    ⚠️ RACE FIX 2026-08-05: antes hacía `scp DB_PATH` mientras el proceso
-    seguía escribiendo en el fichero → copia inconsistente/corrupta en
-    Cassiopeia (el importador podía recibir un SQLite a medias). Ahora se
-    genera una copia consistente con la API de backup de SQLite (snapshot
-    atómico del estado actual) y se sube esa copia. La recolección en el
-    fichero principal no se interrumpe.
+
+def write_synced_watermark(ts):
+    try:
+        with open(WATERMARK_PATH, "w") as fh:
+            fh.write(ts)
+    except OSError as e:
+        log(f"Sync: no se pudo guardar la marca de agua: {e}")
+
+
+def _desde_solape(marca):
+    """Punto de corte del delta: la marca menos SYNC_OVERLAP_MIN minutos."""
+    if not marca:
+        return None
+    try:
+        return (datetime.datetime.fromisoformat(marca)
+                - datetime.timedelta(minutes=SYNC_OVERLAP_MIN)).isoformat()
+    except ValueError:
+        return None  # marca ilegible → copia completa (siempre correcta)
+
+
+def build_snapshot(since=None):
+    """SQLite listo para subir: delta desde `since`, o copia completa si None.
+
+    El importador dedupea por timestamp (readings/positions/can_readings) o por
+    clave (dtc/calibration/fap_events), así que reenviar el solape es inocuo.
     """
     tmp_db = DB_PATH + ".sync"
     try:
-        src = sqlite3.connect(DB_PATH)
-        try:
-            dst = sqlite3.connect(tmp_db)
+        if os.path.exists(tmp_db):
+            os.remove(tmp_db)
+    except OSError:
+        pass
+    src = sqlite3.connect(DB_PATH)
+    dst = sqlite3.connect(tmp_db)
+    try:
+        if since is None:
+            src.backup(dst)  # copia completa: consistente aunque src escriba
+            return tmp_db
+        for (sql,) in src.execute(
+                "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL "
+                "AND name NOT LIKE 'sqlite_%'"):
             try:
-                src.backup(dst)  # snapshot consistente aunque src siga escribiendo
-            finally:
-                dst.close()
-        finally:
-            src.close()
+                dst.execute(sql)
+            except sqlite3.OperationalError:
+                pass  # índice o tabla que ya no aplica
+        dst.execute("ATTACH DATABASE ? AS src", (DB_PATH,))
+        # Series temporales: solo lo posterior al corte.
+        for tabla, col in (("readings", "timestamp"), ("positions", "timestamp"),
+                           ("can_readings", "ts")):
+            dst.execute(f"INSERT INTO main.{tabla} SELECT * FROM src.{tabla} "
+                        f"WHERE {col} > ?", (since,))
+        # Tablas pequeñas con upsert por clave en destino: van enteras.
+        for tabla in ("dtc", "calibration", "fap_events"):
+            try:
+                dst.execute(f"INSERT INTO main.{tabla} SELECT * FROM src.{tabla}")
+            except sqlite3.OperationalError:
+                pass
+        dst.commit()
+    finally:
+        src.close()
+        dst.close()
+    return tmp_db
+
+
+def snapshot_max_ts(path):
+    """Timestamp más nuevo incluido en el snapshot → marca de agua siguiente."""
+    conn = sqlite3.connect(path)
+    try:
+        valores = []
+        for tabla, col in (("readings", "timestamp"), ("positions", "timestamp"),
+                           ("can_readings", "ts")):
+            try:
+                v = conn.execute(f"SELECT MAX({col}) FROM {tabla}").fetchone()[0]
+            except sqlite3.OperationalError:
+                continue
+            if v:
+                valores.append(v)
+        return max(valores) if valores else None
+    finally:
+        conn.close()
+
+
+def sync_to_cassiopeia():
+    """Sube a Cassiopeia lo nuevo (delta) si hay red. No bloquea la recolección.
+
+    ⚠️ RACE FIX 2026-08-05: nunca se sube DB_PATH mientras el proceso escribe;
+    se sube un SQLite aparte.
+
+    ⚠️ 2026-09-15 (subida incremental): antes se mandaba la BD ENTERA cada
+    ~10 min (3,7 MB, ~25 s, creciendo ~0,7 MB/semana). Ahora se manda solo lo
+    posterior a la marca de agua (con 1 h de solape) y **la marca solo avanza si
+    el sync tuvo éxito** → un fallo no pierde nada: se reenvía en el siguiente.
+    """
+    tmp_db = None
+    try:
+        marca = read_synced_watermark()
+        tmp_db = build_snapshot(_desde_solape(marca))
+        siguiente_marca = snapshot_max_ts(tmp_db)
         # Subida EN DOS FASES (fix 2026-09-13): primero a un nombre .part y
         # luego rename atómico en destino. Antes, un scp cortado por timeout
         # dejaba un SQLite truncado en INCOMING_PATH → el importador lo movía a
@@ -580,15 +674,21 @@ def sync_to_cassiopeia():
             err = " ".join((mv.stderr or "").split())[:160]
             log(f"Sync FALLÓ (rename rc={mv.returncode}): {err}")
             return False
+
+        # Solo ahora (fichero ya en su sitio) avanza la marca de agua: si algo
+        # hubiera fallado antes, el próximo sync reenvía el mismo delta.
+        if siguiente_marca and siguiente_marca != marca:
+            write_synced_watermark(siguiente_marca)
         return True
     except Exception as e:
         log(f"Sync FALLÓ (excepción): {type(e).__name__}: {e}")
         return False
     finally:
-        try:
-            os.remove(tmp_db)
-        except OSError:
-            pass
+        if tmp_db:
+            try:
+                os.remove(tmp_db)
+            except OSError:
+                pass
 
 
 # ── Calibración automática ─────────────────────────────────
