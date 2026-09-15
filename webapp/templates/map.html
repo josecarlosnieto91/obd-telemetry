@@ -136,7 +136,7 @@ async function renderMap(fit = false) {
     cons.textContent = '';
     if (sid) {
         const t = allTrips.find(x => x.id === Number(sid));
-        if (t && t.consumo_l100) cons.textContent = `⛽ ${t.consumo_l100} l/100km`;
+        if (t && t.consumo_l100) cons.textContent = `⛽ real ${t.consumo_l100} l/100km`;
     }
 }
 

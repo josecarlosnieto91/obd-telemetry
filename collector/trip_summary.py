@@ -12,6 +12,9 @@ Además inserta el viaje en el sistema de contexto (context.db) para Janus:
 import sqlite3, os, sys, math, json, urllib.request, urllib.parse
 from datetime import datetime
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import fuel_consumption as fc      # consumo real (depósito a depósito)
+
 OBD_DB = os.path.expanduser("~/.hermes/data/obd_telemetry.db")
 CTX_DB = os.path.expanduser("~/.hermes/data/context/context.db")
 CONFIG_PATH = os.path.expanduser("~/.hermes/scripts/obd_vehicle_config.json")
@@ -82,7 +85,7 @@ def connect_db(path, row_factory=True):
     # Migración idempotente: consumo por viaje (fuel_liters, consumption_l100)
     try:
         cols = [r[1] for r in conn.execute("PRAGMA table_info(sessions)")]
-        for col in ("fuel_liters", "consumption_l100"):
+        for col in ("fuel_liters", "consumption_l100", "real_l100"):
             if col not in cols:
                 conn.execute(f"ALTER TABLE sessions ADD COLUMN {col} REAL")
     except sqlite3.OperationalError:
@@ -133,6 +136,50 @@ def parse_ts(s):
         return datetime.fromisoformat(s)
     except Exception:
         return None
+
+
+def real_consumption(c, end_ts, km_per_l, session_id, dist):
+    """Consumo REAL (l/100km) y de dónde sale — no el del cuadro.
+
+    1) **Depósito en curso**: litros por la caída de rango CAN desde el último
+       repostaje (rango calibrado contra el surtidor) / km hechos desde entonces.
+    2) Si aún no hay km suficientes (recién repostado), el **último depósito
+       completo**: km entre los dos últimos repostajes / litros del último.
+
+    El cuadro del coche marca ~la mitad (15/09: 4,2-5,7 frente a 8,29 reales).
+    Comprobado con datos reales: sin el filtro `ts <= end_ts`, un viaje del 13/09
+    usaba el repostaje del 15/09 (posterior a él) y daba 39 l/100km.
+    Devuelve ``(valor, etiqueta)`` o ``(None, None)``.
+    """
+    fills = c.execute(
+        "SELECT ts, liters, fuel_after FROM refuels "
+        "WHERE full_tank=1 AND fuel_after IS NOT NULL AND fuel_after > 0 "
+        "AND ts <= ? ORDER BY ts DESC LIMIT 2", (end_ts,)).fetchall()
+    if not fills:
+        return None, None
+    rango = c.execute(
+        "SELECT range_km FROM can_readings WHERE range_km IS NOT NULL AND ts <= ? "
+        "ORDER BY ts DESC LIMIT 1", (end_ts,)).fetchone()
+    if not rango or not rango["range_km"]:
+        return None, None
+    lleno = fills[0]
+    # El viaje que se cierra ahora todavía no tiene distance_km en la tabla: se suma
+    km_previos = c.execute(
+        "SELECT COALESCE(SUM(distance_km),0) AS km FROM sessions "
+        "WHERE id != ? AND start_time > ? AND start_time <= ?",
+        (session_id, lleno["ts"], end_ts)).fetchone()["km"] or 0.0
+    km_actual = km_previos + (dist or 0.0)
+    actual = fc.consumption_from_range(lleno["fuel_after"] - rango["range_km"],
+                                       km_actual, km_per_l)
+    ultimo = None
+    if len(fills) > 1:
+        a, b = fills[1], fills[0]
+        km_tanque = c.execute(
+            "SELECT COALESCE(SUM(distance_km),0) AS km FROM sessions "
+            "WHERE start_time > ? AND start_time < ?",
+            (a["ts"], b["ts"])).fetchone()["km"] or 0.0
+        ultimo = fc.l100(km_tanque, b["liters"])
+    return fc.pick_current_or_last(km_actual, actual, ultimo)
 
 
 def generate_tips(conn, c, session_id, readings, dist, dur_min):
@@ -369,14 +416,29 @@ def main():
         if litros <= 0 and cons_medio and dist > 0:
             litros = cons_medio * dist / 100.0
 
+        # Calibración del depósito (una sola lectura para todo el viaje)
+        try:
+            with open(CONFIG_PATH) as fh:
+                vcfg = json.load(fh).get("vehicle", {}) or {}
+            km_per_l = float(vcfg.get("range_km_per_l", 17.90))
+            reserve_l = float(vcfg.get("reserve_liters", 5.6))
+        except Exception:
+            km_per_l, reserve_l = 17.90, 5.6
+
+        # Consumo REAL (depósito a depósito). El del cuadro (cons_medio) se
+        # guarda igual en consumption_l100, pero no es lo que se enseña: marca
+        # aproximadamente la mitad de lo que el coche gasta de verdad.
+        real_l100, real_tag = real_consumption(c, end_ts.isoformat(), km_per_l, sid, dist)
+
         # Actualizar sesión (incluye consumo: litros + media l/100km)
         c.execute(
             """UPDATE sessions SET end_time=?, status='completed', distance_km=?,
                max_speed=?, avg_speed=?, max_rpm=?, driving_minutes=?,
-               fuel_liters=?, consumption_l100=? WHERE id=?""",
+               fuel_liters=?, consumption_l100=?, real_l100=? WHERE id=?""",
             (end_ts.isoformat(), round(dist, 2), round(max_speed, 1),
              round(avg_speed, 1), round(max_rpm, 1), dur_min,
-             round(litros, 2), round(cons_medio, 1) if cons_medio else None, sid),
+             round(litros, 2), round(cons_medio, 1) if cons_medio else None,
+             real_l100, sid),
         )
         conn.commit()
 
@@ -390,22 +452,16 @@ def main():
         ]
         if max_rpm:
             lines.append(f"🔧 RPM máx {max_rpm:.0f} · temp máx {max_temp:.0f}°C")
-        if cons_medio:
-            # Real CAN (v4.8) si se usaron can_readings; si no, real OBD 015E;
-            # si no, estimación MAF/AFR
-            if can_used:
-                tag = "consumo CAN"
-            else:
-                used_real = any(r.get("fuel_rate") is not None and r["fuel_rate"] > 0
-                                for r in active)
-                tag = "consumo" if used_real else "consumo est."
+        if real_l100:
+            # La cifra que vale: consumo real depósito a depósito
+            lines.append(f"⛽ real {real_l100:.1f} l/100km "
+                         f"(~{real_l100 * dist / 100:.1f} L) — {real_tag}")
+        elif cons_medio:
+            # Sin datos de depósito: el del cuadro, pero dicho como tal
+            tag = "consumo CAN" if can_used else "consumo est."
             lines.append(f"⛽ {tag} {cons_medio:.1f} l/100km (~{litros:.1f} L)")
         # Combustible restante estimado desde el rango CAN (si hay datos)
         try:
-            with open(CONFIG_PATH) as fh:
-                vcfg = json.load(fh).get("vehicle", {}) or {}
-            km_per_l = float(vcfg.get("range_km_per_l", 17.90))
-            reserve_l = float(vcfg.get("reserve_liters", 5.6))
             last_range = conn.execute(
                 "SELECT range_km FROM can_readings WHERE range_km IS NOT NULL "
                 "AND ts <= ? ORDER BY ts DESC LIMIT 1",

@@ -141,14 +141,26 @@ def api_trips():
     """Trip history + consumo estimado (MAF)."""
     conn = get_db()
     c = conn.cursor()
-    c.execute("""
+    # La webapp y el colector van por separado: si la BD aún no tiene
+    # real_l100 (migración del colector pendiente), no se puede tumbar la
+    # página entera — se degrada a NULL y se usa la estimación con MAF.
+    cols = {r[1] for r in c.execute("PRAGMA table_info(sessions)")}
+    real_col = "real_l100" if "real_l100" in cols else "NULL AS real_l100"
+    c.execute(f"""
         SELECT id, start_time, end_time, distance_km, max_speed, avg_speed,
-               max_rpm, driving_minutes, status
+               max_rpm, driving_minutes, status, consumption_l100, {real_col}
         FROM sessions ORDER BY start_time DESC LIMIT 50
     """)
     trips = [dict(row) for row in c.fetchall()]
     for t in trips:
-        # Consumo estimado: l/100km instantáneo con MAF y speed > 3 km/h
+        # El consumo que se enseña es el REAL (depósito a depósito, calibrado
+        # contra el surtidor). El del cuadro (consumption_l100) marca ~la mitad
+        # y se conserva en la fila, pero no se usa para la cifra visible.
+        t["consumo_cuadro_l100"] = t.get("consumption_l100")
+        if t.get("real_l100") is not None:
+            t["consumo_l100"] = t["real_l100"]
+            continue
+        # Viajes anteriores a la columna real_l100: estimación con MAF
         c.execute(
             "SELECT maf, speed FROM readings WHERE session_id=? AND maf IS NOT NULL",
             (t["id"],),
