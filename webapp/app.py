@@ -11,6 +11,21 @@ from datetime import datetime, timedelta
 from flask import Flask, render_template, jsonify, request
 
 app = Flask(__name__)
+
+
+@app.context_processor
+def _static_version():
+    """Sella la hoja de estilo con su fecha de modificación.
+
+    Sin esto el navegador sirve la copia cacheada y un cambio de CSS «no se
+    aplica»: se diagnostica como si la regla no existiera cuando lo que pasa es
+    que no ha llegado. Con ?v=<mtime> cada edición invalida la caché sola.
+    """
+    try:
+        v = int(os.path.getmtime(os.path.join(app.root_path, "static", "style.css")))
+    except OSError:
+        v = 0
+    return {"static_v": v}
 DB_PATH = os.path.expanduser("~/.hermes/data/obd_telemetry.db")
 
 # car_status.py vive en ../collector (una sola copia en el repo). Antes apuntaba

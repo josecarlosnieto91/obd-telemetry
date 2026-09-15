@@ -1,5 +1,6 @@
 /* ── OBD Telemetry WebApp — Dark Theme ──────────────────── */
 :root {
+    color-scheme: dark;   /* los controles nativos (calendario, desplegable) en oscuro */
     --bg: #0d1117;
     --card: #161b22;
     --card-hover: #1c2333;
@@ -334,4 +335,46 @@ tr:hover { background: var(--card-hover); }
 /* Ocultar columnas secundarias en móvil (siguen en el detalle del viaje) */
 @media (max-width: 700px) {
     .hide-mobile { display: none; }
+}
+
+/* ── Controles de formulario ────────────────────────────────
+   No había NINGUNA regla para input/select: se veían los nativos (fondo
+   blanco, borde gris claro) sobre el tema oscuro. */
+input, select, textarea {
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 7px 10px;
+    font: inherit;
+    font-size: 0.9em;
+    max-width: 100%;
+}
+
+input:focus, select:focus, textarea:focus {
+    outline: none;
+    border-color: var(--accent-dim);
+    box-shadow: 0 0 0 3px rgba(0, 255, 136, 0.15);
+}
+
+input::placeholder, textarea::placeholder { color: var(--text-muted); opacity: 0.75; }
+
+input[type="checkbox"] { width: auto; accent-color: var(--accent); }
+
+/* La flecha nativa cambia de forma en cada navegador: una sola, propia */
+select {
+    -webkit-appearance: none;
+    appearance: none;
+    padding-right: 32px;
+    cursor: pointer;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1.4 1.4 6 6l4.6-4.6' fill='none' stroke='%238b949e' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+}
+
+/* Campos de fecha: el icono del calendario, en claro */
+input[type="date"]::-webkit-calendar-picker-indicator,
+input[type="datetime-local"]::-webkit-calendar-picker-indicator {
+    filter: invert(0.65);
+    cursor: pointer;
 }

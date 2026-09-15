@@ -7,18 +7,18 @@
 <div style="margin-bottom: 10px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center;">
     <div>
         <label for="date-picker"><b>📅 Día:</b></label>
-        <input type="date" id="date-picker" style="padding: 6px; border-radius: 6px; border: 1px solid #ccc; background: #fff; color: #000;">
+        <input type="date" id="date-picker">
     </div>
     <div>
         <label for="trip-select"><b>🚗 Viaje:</b></label>
-        <select id="trip-select" style="padding: 6px; border-radius: 6px; border: 1px solid #ccc; max-width: 100%;">
+        <select id="trip-select">
             <option value="">Todos (historial completo)</option>
         </select>
     </div>
-    <span id="trip-cons" style="font-size: 0.9em; color: #888;"></span>
+    <span id="trip-cons" style="font-size: 0.9em; color: var(--text-muted);"></span>
 </div>
-<div id="map" style="height: 60vh; border-radius: 10px; border: 1px solid #ddd;"></div>
-<div id="map-info" style="margin-top: 10px; font-size: 0.9em; color: #888;"></div>
+<div id="map" style="height: 60vh; border-radius: 10px; border: 1px solid var(--border);"></div>
+<div id="map-info" style="margin-top: 10px; font-size: 0.9em; color: var(--text-muted);"></div>
 {% endblock %}
 
 {% block scripts %}
@@ -136,7 +136,7 @@ async function renderMap(fit = false) {
     cons.textContent = '';
     if (sid) {
         const t = allTrips.find(x => x.id === Number(sid));
-        if (t && t.consumo_l100) cons.textContent = `⛽ real ${t.consumo_l100} l/100km`;
+        if (t && t.consumo_l100) cons.textContent = `⛽ consumo ${t.consumo_l100} l/100km`;
     }
 }
 
