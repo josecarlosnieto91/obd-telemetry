@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "recipe": {
+    "name": "OBD Telemetry (collector + webapp)",
+    "kind": "python",
+    "bootstrap": [
+      "pip install -r requirements.txt"
+    ],
+    "build": [],
+    "test": [
+      "pytest -q"
+    ],
+    "start": "systemctl --user restart obd-webapp.service",
+    "port": 8765,
+    "readinessPath": "/",
+    "evidence": []
+  },
+  "updatedAt": "2026-09-15T00:00:00+00:00"
+}
