@@ -8,7 +8,7 @@ CREATE TABLE sessions (
             max_rpm REAL DEFAULT 0,
             driving_minutes INTEGER DEFAULT 0,
             status TEXT DEFAULT 'active'
-        , fuel_liters REAL, consumption_l100 REAL);
+        , fuel_liters REAL, consumption_l100 REAL, real_l100 REAL);
 CREATE TABLE readings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id INTEGER NOT NULL,
@@ -73,7 +73,7 @@ CREATE TABLE refuels (
         jump_pct REAL,
         liters REAL,
         full_tank INTEGER DEFAULT 0,
-        session_id INTEGER, price_per_l REAL, cost REAL, station TEXT, source TEXT DEFAULT 'level',
+        session_id INTEGER, price_per_l REAL, cost REAL, station TEXT, source TEXT DEFAULT 'level', station_addr TEXT, station_dist_m REAL, car_lat REAL, car_lon REAL,
         UNIQUE(prev_ts, ts)
     );
 CREATE TABLE services (

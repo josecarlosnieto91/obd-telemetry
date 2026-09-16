@@ -182,10 +182,24 @@ def real_consumption(c, end_ts, km_per_l, session_id, dist):
     return fc.pick_current_or_last(km_actual, actual, ultimo)
 
 
-def generate_tips(conn, c, session_id, readings, dist, dur_min):
+TIP_CATEGORIES = ("conduccion", "mantenimiento", "uso")
+
+
+def generate_tips(conn, c, session_id, readings, dist, dur_min, replace=False):
     """Genera consejos de conducción/mantenimiento/uso tras cerrar un viaje
     y los inserta en la tabla alerts (los consume la webapp /maintenance).
-    Portado desde obd_collector.py (el recolector TCP live está pausado)."""
+    Portado desde obd_collector.py (el recolector TCP live está pausado).
+
+    `replace=True`: borra antes los avisos de esa sesión en las categorías que
+    produce esta función, para que recalcular un viaje no acumule consejos
+    viejos. Los avisos de otro origen (termostato, batería, calendario de
+    mantenimiento) van con session_id NULL o fuera de TIP_CATEGORIES: no se
+    tocan."""
+    if replace:
+        c.execute(
+            "DELETE FROM alerts WHERE session_id=? AND category IN (?,?,?)",
+            (session_id, *TIP_CATEGORIES))
+        conn.commit()
     if not readings:
         return
 
@@ -252,6 +266,247 @@ def generate_tips(conn, c, session_id, readings, dist, dur_min):
         conn.commit()
 
 
+def session_metrics(conn, c, sid, end_ts=None, start_hint=None):
+    """Métricas de un viaje, calculadas desde sus lecturas y posiciones.
+
+    Fuente ÚNICA de cálculo: la usa `main()` al cerrar un viaje activo y
+    `recalc_session()` al rehacer uno ya cerrado. Antes vivía dentro de
+    `main()`, y por eso un viaje fusionado o con datos recuperados a posteriori
+    se quedaba con métricas viejas: no había manera de recomputarlas.
+
+    `end_ts`: fin efectivo (lo decide el cierre por inactividad). None → se
+    deriva de la última lectura en movimiento. `start_hint`: start_time de la
+    sesión, último recurso si no hay lecturas activas.
+    Devuelve None si la sesión no tiene ninguna lectura.
+    """
+    if conn.row_factory is None:
+        conn.row_factory = sqlite3.Row
+    c.execute(
+        # ⚠️ ORDER BY timestamp, NO por id (fix 2026-09-16): el id refleja el
+        # ORDEN DE INSERCIÓN, no el cronológico. Con datos recuperados a
+        # posteriori (filas antiguas añadidas después) el orden por id mete
+        # saltos falsos en el cálculo de distancia y falsea el inicio del
+        # viaje (caso real: 167 arrancaba a las 18:00 cuando empezó a 17:41).
+        "SELECT timestamp, lat, lon, gps_speed FROM positions WHERE session_id=? ORDER BY timestamp",
+        (sid,),
+    )
+    positions = [dict(r) for r in c.fetchall()]
+    c.execute(
+        "SELECT timestamp, rpm, speed, coolant_temp, maf, fuel_rate FROM readings WHERE session_id=? ORDER BY timestamp",
+        (sid,),
+    )
+    readings = [dict(r) for r in c.fetchall()]
+    if not readings:
+        return None
+
+    # Solo lecturas "activas": motor en marcha (rpm>0) o coche en movimiento.
+    # Las de motor apagado (rpm=0, maf~0.6) no cuentan para métricas ni consumo.
+    active = [r for r in readings
+              if (r["rpm"] or 0) > 0 or (r["speed"] or 0) > MIN_MOVING_SPEED]
+
+    if end_ts is None:
+        moves = [r["timestamp"] for r in readings
+                 if (r["speed"] or 0) > MIN_MOVING_SPEED]
+        end_ts = parse_ts(moves[-1]) if moves else parse_ts(readings[-1]["timestamp"])
+    if end_ts is None:
+        return None
+
+    # Inicio real: primera lectura activa (no el start_time de la sesión, que
+    # puede arrastrar horas de motor apagado del importador).
+    if active:
+        start = parse_ts(active[0]["timestamp"])
+    else:
+        start = parse_ts(start_hint) if start_hint else None
+        start = start or parse_ts(readings[0]["timestamp"])
+    if start is None:
+        return None
+
+    # Distancia: sumar solo saltos >= MIN_JUMP_M entre posiciones consecutivas.
+    # La deriva GPS de un coche parado genera saltos de 1-10 m que inflan los km.
+    dist = 0.0
+    prev = None
+    for p in positions:
+        if p["lat"] is None or p["lon"] is None:
+            continue
+        if prev:
+            d_m = haversine(prev[0], prev[1], p["lat"], p["lon"]) * 1000.0
+            if d_m >= MIN_JUMP_M:
+                dist += d_m / 1000.0
+        prev = (p["lat"], p["lon"])
+
+    dur_min = max(1, int((end_ts - start).total_seconds() / 60))
+
+    speeds = [r["speed"] for r in active if r["speed"] is not None]
+    rpms = [r["rpm"] for r in active if r["rpm"] is not None]
+    temps = [r["coolant_temp"] for r in active if r["coolant_temp"] is not None]
+    max_speed = max(speeds) if speeds else 0.0
+    avg_speed = (sum(speeds) / len(speeds)) if speeds else (
+        dist / (dur_min / 60.0) if dur_min else 0.0)
+    max_rpm = max(rpms) if rpms else 0.0
+    max_temp = max(temps) if temps else 0.0
+
+    # ¿Es un viaje real? Señal primaria: velocidad OBD (fiable, no deriva).
+    # Si el OBD nunca registró velocidad (coche parado / arranque en frío),
+    # no es viaje aunque la deriva GPS acumule km durante horas. Solo si no
+    # hay lecturas de velocidad (OBD mudo) se usa la distancia GPS.
+    has_speed_data = any(r["speed"] is not None for r in readings)
+    if has_speed_data:
+        is_trip = max_speed >= MIN_TRIP_MAX_SPEED
+    else:
+        is_trip = dist >= MIN_TRIP_KM
+
+    # Consumo: CAN del decodificador Witson (L/100km directos, fuente
+    # primaria) > fuel_rate OBD 015E (L/h) > MAF/AFR (estimación).
+    # v4.8: can_readings trae consumption_l100 del CAN real.
+    cons_inst = []
+    litros = 0.0
+    can_used = False
+    try:
+        can_rows = conn.execute(
+            "SELECT consumption_l100 FROM can_readings "
+            "WHERE ts >= ? AND ts <= ? AND consumption_l100 > 0 AND consumption_l100 < 60 "
+            "ORDER BY ts",
+            (start.isoformat(), end_ts.isoformat())).fetchall()
+        if can_rows:
+            cons_inst = [r[0] for r in can_rows]
+            can_used = True
+            litros = (sum(cons_inst) / len(cons_inst)) * dist / 100.0
+    except Exception:
+        pass
+
+    if not can_used:
+        prev_r = None
+        for r in active:
+            if r.get("fuel_rate") is not None and r["fuel_rate"] > 0:
+                # Consumo real de la ECU: L/h → litros en el intervalo
+                if prev_r is not None:
+                    t1, t2 = parse_ts(prev_r["timestamp"]), parse_ts(r["timestamp"])
+                    if t1 and t2:
+                        dt_h = (t2 - t1).total_seconds() / 3600.0
+                        litros += r["fuel_rate"] * dt_h
+                prev_r = r
+                if r["speed"] and r["speed"] > 3:
+                    l100 = r["fuel_rate"] / r["speed"] * 100.0
+                    if 0 < l100 < 60:
+                        cons_inst.append(l100)
+            elif r["maf"] is not None:
+                # Fallback MAF: litros = aire / AFR / densidad
+                if prev_r is not None:
+                    t1, t2 = parse_ts(prev_r["timestamp"]), parse_ts(r["timestamp"])
+                    if t1 and t2:
+                        dt_h = (t2 - t1).total_seconds() / 3600.0
+                        litros += (r["maf"] / DIESEL_AFR / DENSITY_FUEL) * dt_h
+                prev_r = r
+                if r["speed"] and r["speed"] > 3:
+                    l100 = (r["maf"] / DIESEL_AFR / DENSITY_FUEL) * 3600.0 / r["speed"] * 100.0
+                    if 0 < l100 < 60:
+                        cons_inst.append(l100)
+    cons_medio = (sum(cons_inst) / len(cons_inst)) if cons_inst else None
+    if litros <= 0 and cons_medio and dist > 0:
+        litros = cons_medio * dist / 100.0
+
+    # Calibración del depósito (una sola lectura para todo el viaje)
+    try:
+        with open(CONFIG_PATH) as fh:
+            vcfg = json.load(fh).get("vehicle", {}) or {}
+        km_per_l = float(vcfg.get("range_km_per_l", 17.90))
+        reserve_l = float(vcfg.get("reserve_liters", 5.6))
+    except Exception:
+        km_per_l, reserve_l = 17.90, 5.6
+
+    # Consumo REAL (depósito a depósito). El del cuadro (cons_medio) se
+    # guarda igual en consumption_l100, pero no es lo que se enseña: marca
+    # aproximadamente la mitad de lo que el coche gasta de verdad.
+    real_l100, real_tag = real_consumption(c, end_ts.isoformat(), km_per_l, sid, dist)
+
+    return {
+        "start": start, "end_ts": end_ts, "dur_min": dur_min, "dist": dist,
+        "positions": positions, "readings": readings, "active": active,
+        "max_speed": max_speed, "avg_speed": avg_speed, "max_rpm": max_rpm,
+        "max_temp": max_temp, "litros": litros, "cons_medio": cons_medio,
+        "can_used": can_used, "real_l100": real_l100, "real_tag": real_tag,
+        "km_per_l": km_per_l, "reserve_l": reserve_l, "is_trip": is_trip,
+    }
+
+
+def recalc_session(conn, sid, keep_aggregates=False, c=None):
+    """Recalcula métricas y avisos de un viaje YA CERRADO. Idempotente.
+
+    Por qué existe: `merge_sessions.py` une tramos partidos de un mismo viaje y
+    solo SUMA distancia/minutos. Sin recalcular, la sesión fusionada queda
+    quimérica —velocidad máxima y avisos del primer tramo, con la distancia de
+    los dos— y la única forma de rehacerla era devolverla a 'active' y esperar
+    al cron, que reenviaba el resumen por Telegram y duplicaba el evento en
+    context.db. Este camino recalcula en sitio: no notifica y no toca context.db.
+
+    `keep_aggregates=True` (sesiones fusionadas): NO recomputa distancia ni
+    minutos desde los datos. Ya vienen sumados de los tramos, y recomputarlos
+    cruzaría el hueco sin lecturas (el salto recto entre el fin de un tramo y el
+    inicio del siguiente no son km medidos).
+
+    Los avisos del viaje se borran y se regeneran (replace) para no acumular
+    consejos de una versión anterior de los datos.
+    """
+    if conn.row_factory is None:
+        conn.row_factory = sqlite3.Row
+    c = c or conn.cursor()
+    row = c.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone()
+    if row is None:
+        raise ValueError(f"sesión {sid} no existe")
+    antes = dict(row)
+    m = session_metrics(conn, c, sid, start_hint=antes.get("start_time"))
+
+    if m is None:
+        # Sin lecturas: no hay nada que recalcular, pero que no queden avisos.
+        c.execute("DELETE FROM alerts WHERE session_id=? AND category IN (?,?,?)",
+                  (sid, *TIP_CATEGORIES))
+        conn.commit()
+        return {"id": sid, "sin_datos": True}
+
+    dist = antes["distance_km"] if keep_aggregates else m["dist"]
+    dur_min = antes["driving_minutes"] if keep_aggregates else m["dur_min"]
+    dist = dist or 0.0
+    dur_min = dur_min or 0
+
+    if not m["is_trip"]:
+        c.execute(
+            "UPDATE sessions SET status='completed', distance_km=0, max_speed=0, "
+            "avg_speed=0, max_rpm=0, driving_minutes=0 WHERE id=?", (sid,))
+        c.execute("DELETE FROM alerts WHERE session_id=? AND category IN (?,?,?)",
+                  (sid, *TIP_CATEGORIES))
+        conn.commit()
+        return {"id": sid, "no_viaje": True,
+                "antes": {"dist": antes["distance_km"], "max_speed": antes["max_speed"]}}
+
+    c.execute(
+        """UPDATE sessions SET end_time=?, status='completed', distance_km=?,
+           max_speed=?, avg_speed=?, max_rpm=?, driving_minutes=?,
+           fuel_liters=?, consumption_l100=?, real_l100=? WHERE id=?""",
+        (m["end_ts"].isoformat(), round(dist, 2), round(m["max_speed"], 1),
+         round(m["avg_speed"], 1), round(m["max_rpm"], 1), dur_min,
+         round(m["litros"], 2), round(m["cons_medio"], 1) if m["cons_medio"] else None,
+         m["real_l100"], sid))
+    conn.commit()
+
+    n_avisos_antes = c.execute(
+        "SELECT COUNT(*) FROM alerts WHERE session_id=? AND category IN (?,?,?)",
+        (sid, *TIP_CATEGORIES)).fetchone()[0]
+    generate_tips(conn, c, sid, m["active"], dist, dur_min, replace=True)
+    n_avisos = c.execute(
+        "SELECT COUNT(*) FROM alerts WHERE session_id=? AND category IN (?,?,?)",
+        (sid, *TIP_CATEGORIES)).fetchone()[0]
+
+    return {
+        "id": sid, "dist": round(dist, 2), "dur_min": dur_min,
+        "max_speed": round(m["max_speed"], 1), "avg_speed": round(m["avg_speed"], 1),
+        "max_rpm": round(m["max_rpm"], 1), "real_l100": m["real_l100"],
+        "keep_aggregates": keep_aggregates,
+        "antes": {"dist": antes["distance_km"], "dur_min": antes["driving_minutes"],
+                  "max_speed": antes["max_speed"]},
+        "avisos": {"antes": n_avisos_antes, "despues": n_avisos},
+    }
+
+
 def main():
     conn = connect_db(OBD_DB)
     c = conn.cursor()
@@ -302,65 +557,16 @@ def main():
         # fin efectivo: última lectura con movimiento real (si lo hubo), si no la última
         end_ts = last_move_ts or last_ts
 
-        c.execute(
-            # ⚠️ ORDER BY timestamp, NO por id (fix 2026-09-16): el id refleja el
-            # ORDEN DE INSERCIÓN, no el cronológico. Con datos recuperados a
-            # posteriori (filas antiguas añadidas después) el orden por id mete
-            # saltos falsos en el cálculo de distancia y falsea el inicio del
-            # viaje (caso real: 167 arrancaba a las 18:00 cuando empezó a 17:41).
-            "SELECT timestamp, lat, lon, gps_speed FROM positions WHERE session_id=? ORDER BY timestamp",
-            (sid,),
-        )
-        positions = [dict(r) for r in c.fetchall()]
-        c.execute(
-            "SELECT timestamp, rpm, speed, coolant_temp, maf, fuel_rate FROM readings WHERE session_id=? ORDER BY timestamp",
-            (sid,),
-        )
-        readings = [dict(r) for r in c.fetchall()]
-
-        # Solo lecturas "activas": motor en marcha (rpm>0) o coche en movimiento.
-        # Las de motor apagado (rpm=0, maf~0.6) no cuentan para métricas ni consumo.
-        active = [r for r in readings
-                  if (r["rpm"] or 0) > 0 or (r["speed"] or 0) > MIN_MOVING_SPEED]
-
-        # Distancia: sumar solo saltos >= MIN_JUMP_M entre posiciones consecutivas.
-        # La deriva GPS de un coche parado genera saltos de 1-10 m que inflan los km.
-        dist = 0.0
-        prev = None
-        for p in positions:
-            if p["lat"] is None or p["lon"] is None:
-                continue
-            if prev:
-                d_m = haversine(prev[0], prev[1], p["lat"], p["lon"]) * 1000.0
-                if d_m >= MIN_JUMP_M:
-                    dist += d_m / 1000.0
-            prev = (p["lat"], p["lon"])
-
-        # Inicio real: primera lectura activa (no el start_time de la sesión, que
-        # puede arrastrar horas de motor apagado del importador).
-        start = parse_ts(s["start_time"]) or last_ts
-        if active:
-            start = parse_ts(active[0]["timestamp"]) or start
-        dur_min = max(1, int((end_ts - start).total_seconds() / 60))
-
-        speeds = [r["speed"] for r in active if r["speed"] is not None]
-        rpms = [r["rpm"] for r in active if r["rpm"] is not None]
-        temps = [r["coolant_temp"] for r in active if r["coolant_temp"] is not None]
-        max_speed = max(speeds) if speeds else 0.0
-        avg_speed = (sum(speeds) / len(speeds)) if speeds else (
-            dist / (dur_min / 60.0) if dur_min else 0.0)
-        max_rpm = max(rpms) if rpms else 0.0
-        max_temp = max(temps) if temps else 0.0
-
-        # ¿Es un viaje real? Señal primaria: velocidad OBD (fiable, no deriva).
-        # Si el OBD nunca registró velocidad (coche parado / arranque en frío),
-        # no es viaje aunque la deriva GPS acumule km durante horas. Solo si no
-        # hay lecturas de velocidad (OBD mudo) se usa la distancia GPS.
-        has_speed_data = any(r["speed"] is not None for r in readings)
-        if has_speed_data:
-            is_trip = max_speed >= MIN_TRIP_MAX_SPEED
-        else:
-            is_trip = dist >= MIN_TRIP_KM
+        # Métricas del viaje: cálculo compartido con recalc_session() — una sola
+        # fuente de verdad. `end_ts` lo fija arriba el cierre por inactividad.
+        m = session_metrics(conn, c, sid, end_ts=end_ts, start_hint=s["start_time"])
+        if m is None:
+            continue
+        positions, readings, active = m["positions"], m["readings"], m["active"]
+        dist, dur_min, start = m["dist"], m["dur_min"], m["start"]
+        max_speed, avg_speed = m["max_speed"], m["avg_speed"]
+        max_rpm, max_temp = m["max_rpm"], m["max_temp"]
+        is_trip = m["is_trip"]
 
         if not is_trip:
             c.execute(
@@ -371,69 +577,9 @@ def main():
             conn.commit()
             continue  # silencio: no es un viaje, no hay resumen ni Janus
 
-        # Consumo: CAN del decodificador Witson (L/100km directos, fuente
-        # primaria) > fuel_rate OBD 015E (L/h) > MAF/AFR (estimación).
-        # v4.8: can_readings trae consumption_l100 del CAN real.
-        cons_inst = []
-        litros = 0.0
-        can_used = False
-        try:
-            can_rows = conn.execute(
-                "SELECT consumption_l100 FROM can_readings "
-                "WHERE ts >= ? AND ts <= ? AND consumption_l100 > 0 AND consumption_l100 < 60 "
-                "ORDER BY ts",
-                (start.isoformat(), end_ts.isoformat())).fetchall()
-            if can_rows:
-                cons_inst = [r[0] for r in can_rows]
-                can_used = True
-                litros = (sum(cons_inst) / len(cons_inst)) * dist / 100.0
-        except Exception:
-            pass
-
-        if not can_used:
-            prev_r = None
-            for r in active:
-                if r.get("fuel_rate") is not None and r["fuel_rate"] > 0:
-                    # Consumo real de la ECU: L/h → litros en el intervalo
-                    if prev_r is not None:
-                        t1, t2 = parse_ts(prev_r["timestamp"]), parse_ts(r["timestamp"])
-                        if t1 and t2:
-                            dt_h = (t2 - t1).total_seconds() / 3600.0
-                            litros += r["fuel_rate"] * dt_h
-                    prev_r = r
-                    if r["speed"] and r["speed"] > 3:
-                        l100 = r["fuel_rate"] / r["speed"] * 100.0
-                        if 0 < l100 < 60:
-                            cons_inst.append(l100)
-                elif r["maf"] is not None:
-                    # Fallback MAF: litros = aire / AFR / densidad
-                    if prev_r is not None:
-                        t1, t2 = parse_ts(prev_r["timestamp"]), parse_ts(r["timestamp"])
-                        if t1 and t2:
-                            dt_h = (t2 - t1).total_seconds() / 3600.0
-                            litros += (r["maf"] / DIESEL_AFR / DENSITY_FUEL) * dt_h
-                    prev_r = r
-                    if r["speed"] and r["speed"] > 3:
-                        l100 = (r["maf"] / DIESEL_AFR / DENSITY_FUEL) * 3600.0 / r["speed"] * 100.0
-                        if 0 < l100 < 60:
-                            cons_inst.append(l100)
-        cons_medio = (sum(cons_inst) / len(cons_inst)) if cons_inst else None
-        if litros <= 0 and cons_medio and dist > 0:
-            litros = cons_medio * dist / 100.0
-
-        # Calibración del depósito (una sola lectura para todo el viaje)
-        try:
-            with open(CONFIG_PATH) as fh:
-                vcfg = json.load(fh).get("vehicle", {}) or {}
-            km_per_l = float(vcfg.get("range_km_per_l", 17.90))
-            reserve_l = float(vcfg.get("reserve_liters", 5.6))
-        except Exception:
-            km_per_l, reserve_l = 17.90, 5.6
-
-        # Consumo REAL (depósito a depósito). El del cuadro (cons_medio) se
-        # guarda igual en consumption_l100, pero no es lo que se enseña: marca
-        # aproximadamente la mitad de lo que el coche gasta de verdad.
-        real_l100, real_tag = real_consumption(c, end_ts.isoformat(), km_per_l, sid, dist)
+        litros, cons_medio, can_used = m["litros"], m["cons_medio"], m["can_used"]
+        real_l100, real_tag = m["real_l100"], m["real_tag"]
+        km_per_l, reserve_l = m["km_per_l"], m["reserve_l"]
 
         # Actualizar sesión (incluye consumo: litros + media l/100km)
         c.execute(
@@ -521,5 +667,40 @@ def main():
         print("\n\n".join(reports))
 
 
+def _cli_recalc(ids, keep_aggregates=False):
+    """`--recalc <id> [<id>...]`: rehace métricas y avisos de viajes ya cerrados.
+
+    Para cuando los datos llegan o cambian DESPUÉS del cierre (recuperación de
+    un fichero entrante, fusión de tramos, corrección de un orden de lectura):
+    el camino normal solo recalcula sesiones 'active'.
+    """
+    conn = connect_db(OBD_DB)
+    for sid in ids:
+        try:
+            r = recalc_session(conn, sid, keep_aggregates=keep_aggregates)
+        except ValueError as e:
+            print(f"⚠️  {e}")
+            continue
+        if r.get("sin_datos"):
+            print(f"♻️  sesión {sid}: sin lecturas (solo se han limpiado avisos)")
+        elif r.get("no_viaje"):
+            print(f"♻️  sesión {sid}: no es viaje real → métricas a cero")
+        else:
+            a = r["antes"]
+            print(f"♻️  sesión {sid}: {r['dist']} km · {r['dur_min']} min · "
+                  f"máx {r['max_speed']} km/h (antes: {a['dist']} km · {a['dur_min']} min · "
+                  f"máx {a['max_speed']} km/h) · avisos {r['avisos']['antes']}→{r['avisos']['despues']}")
+    conn.close()
+
+
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1 and sys.argv[1] == "--recalc":
+        args = [a for a in sys.argv[2:] if a != "--keep-aggregates"]
+        keep = "--keep-aggregates" in sys.argv[2:]
+        ids = [int(x) for x in args]
+        if not ids:
+            sys.exit("uso: trip_summary.py --recalc <session_id> [<session_id>...] "
+                     "[--keep-aggregates]")
+        _cli_recalc(ids, keep_aggregates=keep)
+    else:
+        main()

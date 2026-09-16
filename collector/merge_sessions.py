@@ -21,6 +21,12 @@ import sqlite3
 import sys
 from datetime import datetime, timedelta
 
+# `trip_summary` es la fuente única del cálculo de métricas: la fusión mueve
+# datos entre sesiones y necesita recalcular con las mismas reglas que el cierre
+# de un viaje (no puede haber dos fórmulas).
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from trip_summary import recalc_session  # noqa: E402
+
 OBD_DB = os.path.expanduser("~/.hermes/data/obd_telemetry.db")
 CONFIG_PATH = os.path.expanduser("~/.hermes/scripts/obd_vehicle_config.json")
 
@@ -154,8 +160,17 @@ def main():
                 (drop["end_time"], round(dist, 2), mins, keep["id"]))
             c.execute("DELETE FROM sessions WHERE id=?", (drop["id"],))
             conn.commit()
+            # La fusión mueve los datos, pero NO recalcula: sin esto la sesión
+            # fusionada se quedaba con la velocidad máxima, la media y los avisos
+            # del primer tramo (caso real 12-sep: máx 42 km/h con lecturas de 127
+            # y el «Trayecto corto (1 min)» del tramo viejo).
+            # keep_aggregates: distancia y minutos ya vienen sumados arriba y
+            # recomputarlos cruzaría el hueco sin lecturas.
+            info = recalc_session(conn, keep["id"], keep_aggregates=True)
             print(f"🔄 Fusionadas {keep['id']} ← {drop['id']} "
-                  f"(gap {gap:.1f} min, {n_read} lecturas movidas)")
+                  f"(gap {gap:.1f} min, {n_read} lecturas movidas) → "
+                  f"{info.get('dist')} km · {info.get('dur_min')} min · "
+                  f"máx {info.get('max_speed')} km/h")
             merged += 1
             changed = True
             break  # reiniciar: los ids pueden haber cambiado
