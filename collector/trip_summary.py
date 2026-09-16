@@ -303,12 +303,17 @@ def main():
         end_ts = last_move_ts or last_ts
 
         c.execute(
-            "SELECT timestamp, lat, lon, gps_speed FROM positions WHERE session_id=? ORDER BY id",
+            # ⚠️ ORDER BY timestamp, NO por id (fix 2026-09-16): el id refleja el
+            # ORDEN DE INSERCIÓN, no el cronológico. Con datos recuperados a
+            # posteriori (filas antiguas añadidas después) el orden por id mete
+            # saltos falsos en el cálculo de distancia y falsea el inicio del
+            # viaje (caso real: 167 arrancaba a las 18:00 cuando empezó a 17:41).
+            "SELECT timestamp, lat, lon, gps_speed FROM positions WHERE session_id=? ORDER BY timestamp",
             (sid,),
         )
         positions = [dict(r) for r in c.fetchall()]
         c.execute(
-            "SELECT timestamp, rpm, speed, coolant_temp, maf, fuel_rate FROM readings WHERE session_id=? ORDER BY id",
+            "SELECT timestamp, rpm, speed, coolant_temp, maf, fuel_rate FROM readings WHERE session_id=? ORDER BY timestamp",
             (sid,),
         )
         readings = [dict(r) for r in c.fetchall()]
