@@ -67,7 +67,14 @@ def main():
     ts_all = set()
     for table, cols in (("readings", READINGS_COLS), ("positions", POSITIONS_COLS)):
         src_cols = [r[1] for r in src.execute(f"PRAGMA table_info({table})")]
-        cols = tuple(c for c in cols if c in src_cols)
+        dst_cols = [r[1] for r in mst.execute(f"PRAGMA table_info({table})")]
+        # nombres antiguos del fichero de la tablet (coolant, alt...) y evolución
+        # del esquema del maestro: se copia solo lo que existe en los dos.
+        cols = tuple(c for c in cols if c in src_cols and c in dst_cols)
+        if "timestamp" not in cols:
+            # ficheros antiguos sin esa tabla (o sin columnas en común)
+            print(f"{table}: tabla ausente o sin columnas comunes — se omite")
+            continue
         have = {r[0] for r in mst.execute(f"SELECT timestamp FROM {table}")}
         rows = src.execute(f"SELECT {','.join(cols)} FROM {table} ORDER BY timestamp").fetchall()
         ti = cols.index("timestamp")
