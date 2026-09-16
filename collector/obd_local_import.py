@@ -441,6 +441,29 @@ def main():
         # SESSION_GAP_MINUTES crea su PROPIA sesión, con start_time = primer
         # dato del bloque (no el del día anterior).
         blocks = split_into_blocks(local_conn, last_dest_ts)
+
+        # ⚠️ FIX 2026-09-16: cota inferior de las POSICIONES del primer bloque.
+        # El filtro de posiciones usaba la ventana de LECTURAS, y el GPS muestrea
+        # más fino que el OBD: los puntos entre la última posición importada y la
+        # primera lectura nueva (el «seam» de cada sync partido) se descartaban en
+        # silencio. Se vio auditando los ficheros procesados: 3 posiciones perdidas
+        # en 2 semanas (p.ej. 15-09 10:05:22, con lecturas a 10:04:51 y 10:05:54).
+        # Se baja la cota hasta la última posición importada, pero solo si está
+        # dentro del mismo viaje (≤ SESSION_GAP_MINUTES): no se reabren ventanas
+        # antiguas de las que no tengamos datos.
+        pos_lo_first = None
+        if blocks:
+            try:
+                row = target_conn.execute("SELECT MAX(timestamp) FROM positions").fetchone()
+                last_pos_ts = row[0] if row else None
+                if last_pos_ts and (
+                        datetime.datetime.fromisoformat(blocks[0][0])
+                        - datetime.datetime.fromisoformat(last_pos_ts)
+                ).total_seconds() / 60.0 <= SESSION_GAP_MINUTES:
+                    pos_lo_first = min(blocks[0][0], last_pos_ts)
+            except (sqlite3.OperationalError, TypeError, ValueError):
+                pos_lo_first = None
+
         if not blocks:
             # Sin lecturas nuevas: sesión para dtc/fap/cal (o nada)
             session_id = get_or_create_active_session(target_conn, start_ts, first_new_ts)
@@ -453,6 +476,7 @@ def main():
             last_valid_session = None
             for (bmin, bmax) in blocks:
                 creada_aqui = False
+                es_primer_bloque = session_id is None
                 if session_id is None:
                     # Primer bloque: reutiliza la sesión activa si el hueco es
                     # pequeño (viaje en curso) o crea una limpia.
@@ -468,7 +492,10 @@ def main():
                     session_id = cur.lastrowid
                     creada_aqui = True
                 r = import_readings(target_conn, local_conn, session_id, bmin, bmax)
-                p = import_positions(target_conn, local_conn, session_id, bmin, bmax)
+                # Primer bloque: las posiciones pueden empezar ANTES de su primera
+                # lectura (GPS más fino que el OBD) → cota del seam (fix 2026-09-16).
+                pos_lo = pos_lo_first if (es_primer_bloque and pos_lo_first) else bmin
+                p = import_positions(target_conn, local_conn, session_id, pos_lo, bmax)
                 if creada_aqui and r == 0 and p == 0:
                     # BUG FIX 2026-09-11: bloque sin datos nuevos (fichero local
                     # con duplicados / rango ya importado) → la sesión quedaría
