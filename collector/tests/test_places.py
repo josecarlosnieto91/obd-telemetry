@@ -104,15 +104,37 @@ def test_rellena_el_historico_con_los_lugares(tmp_path, cache, monkeypatch):
     obd, ctx = _bds(tmp_path)
     monkeypatch.setattr(ts, "reverse_geocode",
                         lambda lat, lon: "Oviedo" if lon > -5.83 else "Gijón")
-    rellenos, sin_gps = ts._cli_lugares(obd_db=obd, ctx_db=ctx)
+    rellenos, huerfanas, sin_gps = ts._cli_lugares(obd_db=obd, ctx_db=ctx)
 
     c = sqlite3.connect(ctx)
     viaje1 = c.execute("SELECT start_place, end_place FROM trips WHERE id=1").fetchone()
     viaje2 = c.execute("SELECT start_place, end_place FROM trips WHERE id=2").fetchone()
     c.close()
     assert viaje1 == ("Gijón", "Oviedo")      # primero y último punto GPS
-    assert viaje2 == (None, None)             # sin GPS: se deja como estaba
-    assert rellenos == 1 and sin_gps == 1
+    assert viaje2 == (None, None)             # sin sesión: no se inventa nada
+    assert (rellenos, huerfanas, sin_gps) == (1, 1, 0)
+
+
+def test_distingue_huerfana_de_sin_gps(tmp_path, cache, monkeypatch):
+    """Una fila SIN SESIÓN (fragmento de fusión) no es lo mismo que un viaje real
+    cuyas posiciones no llegaron: se cuentan por separado, que es lo que hace que
+    el informe diga la verdad."""
+    obd, ctx = _bds(tmp_path)
+    # viaje real (tiene sesión) pero sin posiciones GPS
+    c = sqlite3.connect(obd)
+    c.execute("INSERT INTO sessions VALUES (99, '2026-09-10T08:00:00')")
+    c.commit()
+    c.close()
+    c = sqlite3.connect(ctx)
+    c.execute("INSERT INTO trips VALUES (3,'2026-09-10','2026-09-10T08:00:00',"
+              "'2026-09-10T08:30:00',NULL,NULL,12.0,30)")
+    c.commit()
+    c.close()
+    monkeypatch.setattr(ts, "reverse_geocode", lambda lat, lon: "Oviedo")
+    rellenos, huerfanas, sin_gps = ts._cli_lugares(obd_db=obd, ctx_db=ctx)
+    assert rellenos == 1          # el que tiene GPS
+    assert huerfanas == 1         # el 2: no hay sesión que le corresponda
+    assert sin_gps == 1           # el 3: sesión sí, posiciones no
 
 
 def test_no_repite_los_que_ya_tienen_lugar(tmp_path, cache, monkeypatch):
@@ -127,6 +149,6 @@ def test_no_repite_los_que_ya_tienen_lugar(tmp_path, cache, monkeypatch):
     monkeypatch.setattr(ts, "reverse_geocode", contar)
     ts._cli_lugares(obd_db=obd, ctx_db=ctx)
     primera = len(llamadas)
-    rellenos, _ = ts._cli_lugares(obd_db=obd, ctx_db=ctx)
+    rellenos, _, _ = ts._cli_lugares(obd_db=obd, ctx_db=ctx)
     assert rellenos == 0
     assert len(llamadas) == primera, "volvió a geocodificar viajes que ya tenían lugar"

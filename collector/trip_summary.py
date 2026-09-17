@@ -767,7 +767,12 @@ def _cli_lugares(limite=None, solo_vacios=True, obd_db=None, ctx_db=None):
     Se resuelve el primer y el último punto GPS de cada viaje, con la caché de
     geocodificación delante (casa y trabajo se preguntan UNA vez, no cien).
 
-    Devuelve (rellenados, sin_gps).
+    Los que no se pueden rellenar se cuentan por su causa, que NO son lo mismo:
+    una fila **huérfana** es un fragmento de una fusión vieja (no hay sesión que
+    le corresponda y sobra en `trips`); **sin GPS** es un viaje real cuyas
+    posiciones no llegaron. Decir «sin GPS» de las huérfanas despista.
+
+    Devuelve (rellenados, huerfanas, sin_gps).
     """
     con = connect_db(obd_db or OBD_DB)
     ctx = connect_db(ctx_db or CTX_DB)
@@ -778,14 +783,18 @@ def _cli_lugares(limite=None, solo_vacios=True, obd_db=None, ctx_db=None):
     if limite:
         sql += " limit %d" % int(limite)
     filas = cc.execute(sql).fetchall()
-    rellenos = sin_gps = 0
+    rellenos = huerfanas = sin_gps = 0
     for f in filas:
+        sid = con.execute("SELECT id FROM sessions WHERE start_time=? LIMIT 1",
+                          (f["start_time"],)).fetchone()
         pos = con.execute(
-            "SELECT lat, lon FROM positions WHERE session_id="
-            "(SELECT id FROM sessions WHERE start_time=? LIMIT 1)"
-            " ORDER BY timestamp", (f["start_time"],)).fetchall()
+            "SELECT lat, lon FROM positions WHERE session_id=? ORDER BY timestamp",
+            (sid["id"],)).fetchall() if sid else []
         if not pos:
-            sin_gps += 1
+            if sid:
+                sin_gps += 1
+            else:
+                huerfanas += 1        # fragmento de fusión vieja: no es un viaje
             continue
         inicio = nombre_lugar(pos[0]["lat"], pos[0]["lon"]) if f["start_place"] is None else f["start_place"]
         fin = nombre_lugar(pos[-1]["lat"], pos[-1]["lon"]) if f["end_place"] is None else f["end_place"]
@@ -797,7 +806,7 @@ def _cli_lugares(limite=None, solo_vacios=True, obd_db=None, ctx_db=None):
     ctx.commit()
     ctx.close()
     con.close()
-    return rellenos, sin_gps
+    return rellenos, huerfanas, sin_gps
 
 
 if __name__ == "__main__":
@@ -811,7 +820,12 @@ if __name__ == "__main__":
         _cli_recalc(ids, keep_aggregates=keep)
     elif len(sys.argv) > 1 and sys.argv[1] == "--lugares":
         limite = int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2].isdigit() else None
-        n, sin_gps = _cli_lugares(limite)
-        print(f"📍 {n} viajes con origen/destino · {sin_gps} sin GPS (no se inventa nada)")
+        n, huerfanas, sin_gps = _cli_lugares(limite)
+        print(f"📍 {n} viajes con origen/destino")
+        if huerfanas:
+            print(f"⚠️  {huerfanas} filas huérfanas en context.trips (sin sesión: fragmentos de "
+                  f"fusiones viejas) — no se tocan, hay que consolidarlas a mano")
+        if sin_gps:
+            print(f"❓ {sin_gps} viajes reales sin posiciones GPS — no se inventa nada")
     else:
         main()
