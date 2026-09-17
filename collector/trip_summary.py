@@ -9,7 +9,7 @@ Además inserta el viaje en el sistema de contexto (context.db) para Janus:
   - evento type='vehiculo' value='viaje' (detail = JSON con métricas)
   - fila en tabla trips
 """
-import sqlite3, os, sys, math, json, urllib.request, urllib.parse
+import sqlite3, os, sys, math, json, time, urllib.request, urllib.parse
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -18,6 +18,8 @@ import fuel_consumption as fc      # consumo real (depósito a depósito)
 OBD_DB = os.path.expanduser("~/.hermes/data/obd_telemetry.db")
 CTX_DB = os.path.expanduser("~/.hermes/data/context/context.db")
 CONFIG_PATH = os.path.expanduser("~/.hermes/scripts/obd_vehicle_config.json")
+GEOCODE_CACHE = os.path.expanduser("~/.hermes/data/geocode_cache.json")
+GEOCODE_MIN_INTERVAL = 1.1   # segundos entre peticiones a Nominatim (su política: máx 1/s)
 IDLE_MINUTES = 15     # sin lecturas NUEVAS durante 15 min => bridge apagado, viaje terminado
 STOPPED_MINUTES = 15  # coche parado (speed < MIN_MOVING_SPEED) durante 15 min => viaje terminado
 MIN_MOVING_SPEED = 1.0   # km/h: por debajo, el coche está parado
@@ -91,6 +93,67 @@ def connect_db(path, row_factory=True):
     except sqlite3.OperationalError:
         pass
     return conn
+
+
+def _cache_key(lat, lon):
+    """Clave de caché a 3 decimales (~110 m).
+
+    Lo que devuelve Nominatim para el zoom 12 es el municipio o la localidad, así
+    que redondear 110 m no cambia la respuesta y convierte en UNA consulta las
+    cientos de veces que el coche se para en el mismo sitio (casa, trabajo, la
+    gasolinera de siempre).
+    """
+    return "%.3f,%.3f" % (round(lat, 3), round(lon, 3))
+
+
+def _leer_cache(path):
+    try:
+        with open(path) as fh:
+            datos = json.load(fh)
+        return datos if isinstance(datos, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def reverse_geocode_cached(lat, lon, cache_path=None, esperar=True):
+    """`reverse_geocode` con caché en disco y respetando 1 petición/segundo.
+
+    Sin caché, cada cierre de viaje (y cada relleno del histórico) volvería a
+    preguntar por los mismos sitios. Solo se guardan los aciertos: un fallo de
+    red no se cachea, para poder reintentarlo.
+    """
+    if lat is None or lon is None:
+        return None
+    path = cache_path or GEOCODE_CACHE
+    clave = _cache_key(lat, lon)
+    cache = _leer_cache(path)
+    if clave in cache:
+        return cache[clave]
+    if esperar:
+        time.sleep(GEOCODE_MIN_INTERVAL)   # política de Nominatim: máx 1 req/s
+    lugar = reverse_geocode(lat, lon)
+    if not lugar:
+        return None
+    cache[clave] = lugar
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(cache, fh, ensure_ascii=False)
+        os.replace(tmp, path)              # atómico
+    except OSError:
+        pass
+    return lugar
+
+
+def nombre_lugar(lat, lon):
+    """Nombre del sitio; si no se puede resolver, las coordenadas.
+
+    Unas coordenadas son un dato (dicen dónde fue); «sin determinar» no dice
+    nada. Es el mismo criterio que usa la línea `📍 fin:` del resumen.
+    """
+    if lat is None or lon is None:
+        return None
+    return reverse_geocode_cached(lat, lon) or "%.4f,%.4f" % (lat, lon)
 
 
 def reverse_geocode(lat, lon):
@@ -623,16 +686,18 @@ def main():
                 lines.append(f"🛢️ Restante: ~{litros_rest:.0f} L (rango {rango:.0f} km)")
         except Exception:
             pass
+        # Origen y destino del viaje. Se guardan en la tabla `trips` de Janus, que
+        # es de donde los lee el panel y la consola del salón: antes se escribían
+        # a NULL y ahí salía «origen/destino sin determinar».
+        first_place = last_place = None
         if positions:
-            lastp = positions[-1]
-            lugar = reverse_geocode(lastp["lat"], lastp["lon"])
-            if lugar:
-                lines.append(f"📍 fin: {lugar}")
-            else:
-                lines.append(f"📍 fin: {lastp['lat']:.4f},{lastp['lon']:.4f}")
-            last_place = lugar
-        else:
-            last_place = None
+            firstp, lastp = positions[0], positions[-1]
+            first_place = nombre_lugar(firstp["lat"], firstp["lon"])
+            last_place = nombre_lugar(lastp["lat"], lastp["lon"])
+            if first_place:
+                lines.append(f"📍 inicio: {first_place}")
+            if last_place:
+                lines.append(f"📍 fin: {last_place}")
         report = "\n".join(lines)
 
         # Janus: evento + trip en context.db
@@ -643,17 +708,18 @@ def main():
                 "km": round(dist, 1), "min": dur_min,
                 "avg": round(avg_speed, 0), "max_speed": round(max_speed, 0),
                 "consumo": round(cons_medio, 1) if cons_medio else None,
-                "fin": last_place,
+                "inicio": first_place, "fin": last_place,
             }, ensure_ascii=False)
             cc.execute(
                 "INSERT INTO events (ts, ts_unix, type, value, detail) VALUES (?,?,?,?,?)",
                 (end_ts.isoformat(), int(end_ts.timestamp()), "vehiculo", "viaje", detail),
             )
             cc.execute(
-                """INSERT INTO trips (date, start_time, end_time, distance_km, duration_min)
-                   VALUES (?,?,?,?,?)""",
+                """INSERT INTO trips (date, start_time, end_time, distance_km, duration_min,
+                                      start_place, end_place)
+                   VALUES (?,?,?,?,?,?,?)""",
                 (start.strftime("%Y-%m-%d"), start.isoformat(), end_ts.isoformat(),
-                 round(dist, 2), dur_min),
+                 round(dist, 2), dur_min, first_place, last_place),
             )
             ctx.commit()
             ctx.close()
@@ -693,6 +759,47 @@ def _cli_recalc(ids, keep_aggregates=False):
     conn.close()
 
 
+def _cli_lugares(limite=None, solo_vacios=True, obd_db=None, ctx_db=None):
+    """`--lugares [n]`: rellena origen y destino de los viajes ya escritos en Janus.
+
+    Para el histórico: los viajes cerrados antes de que esto existiera tienen la
+    columna a NULL, y en el panel salían como «origen/destino sin determinar».
+    Se resuelve el primer y el último punto GPS de cada viaje, con la caché de
+    geocodificación delante (casa y trabajo se preguntan UNA vez, no cien).
+
+    Devuelve (rellenados, sin_gps).
+    """
+    con = connect_db(obd_db or OBD_DB)
+    ctx = connect_db(ctx_db or CTX_DB)
+    cc = ctx.cursor()
+    sql = ("select id, start_time, start_place, end_place from trips"
+           + (" where start_place is null or end_place is null" if solo_vacios else "")
+           + " order by date desc, start_time desc")
+    if limite:
+        sql += " limit %d" % int(limite)
+    filas = cc.execute(sql).fetchall()
+    rellenos = sin_gps = 0
+    for f in filas:
+        pos = con.execute(
+            "SELECT lat, lon FROM positions WHERE session_id="
+            "(SELECT id FROM sessions WHERE start_time=? LIMIT 1)"
+            " ORDER BY timestamp", (f["start_time"],)).fetchall()
+        if not pos:
+            sin_gps += 1
+            continue
+        inicio = nombre_lugar(pos[0]["lat"], pos[0]["lon"]) if f["start_place"] is None else f["start_place"]
+        fin = nombre_lugar(pos[-1]["lat"], pos[-1]["lon"]) if f["end_place"] is None else f["end_place"]
+        cc.execute("UPDATE trips SET start_place=?, end_place=? WHERE id=?",
+                   (inicio, fin, f["id"]))
+        rellenos += 1
+        if rellenos % 10 == 0:
+            ctx.commit()
+    ctx.commit()
+    ctx.close()
+    con.close()
+    return rellenos, sin_gps
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--recalc":
         args = [a for a in sys.argv[2:] if a != "--keep-aggregates"]
@@ -702,5 +809,9 @@ if __name__ == "__main__":
             sys.exit("uso: trip_summary.py --recalc <session_id> [<session_id>...] "
                      "[--keep-aggregates]")
         _cli_recalc(ids, keep_aggregates=keep)
+    elif len(sys.argv) > 1 and sys.argv[1] == "--lugares":
+        limite = int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2].isdigit() else None
+        n, sin_gps = _cli_lugares(limite)
+        print(f"📍 {n} viajes con origen/destino · {sin_gps} sin GPS (no se inventa nada)")
     else:
         main()
