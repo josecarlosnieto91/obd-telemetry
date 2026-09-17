@@ -759,6 +759,89 @@ def _cli_recalc(ids, keep_aggregates=False):
     conn.close()
 
 
+def consolidar_janus(obd_db=None, ctx_db=None, dry_run=True):
+    """Deja la tabla `trips` de Janus en espejo de las sesiones reales.
+
+    Por qué hace falta: un viaje **fusionado** deja en `context.db` las filas de
+    los tramos absorbidos —el panel y la consola los enseñan como viajes sueltos,
+    y entre todas suman los km del fusionado (13/09: 0,86+49,18+78,37+5,06 =
+    133,47 km = la sesión 177)—, y un recálculo que cambia el `start_time` deja
+    la fila vieja huérfana. Resultado medido: 136 filas frente a 92 sesiones.
+
+    Qué hace, por cada sesión real (`end_time` y `km > 0`):
+
+    - su fila (la que casa por `start_time`) se **actualiza** con los valores de
+      la sesión y los lugares;
+    - si no tiene fila, se **inserta**;
+    - se **borran** las filas contenidas en su intervalo (tramos absorbidos).
+
+    Las filas que no encajan en ninguna sesión **no se borran**: se devuelven en
+    `dudosas` para revisarlas (borrar a ciegas es cómo se pierde histórico).
+
+    Con `dry_run=True` no toca nada: solo devuelve el plan.
+    """
+    con = connect_db(obd_db or OBD_DB)
+    ctx = connect_db(ctx_db or CTX_DB)
+    cc = ctx.cursor()
+    sesiones = con.execute(
+        "SELECT id, start_time, end_time, distance_km, driving_minutes FROM sessions "
+        "WHERE end_time IS NOT NULL AND distance_km > 0 ORDER BY start_time").fetchall()
+    filas = cc.execute("SELECT id, start_time, end_time FROM trips").fetchall()
+
+    plan = {"actualizar": [], "insertar": [], "borrar": [], "dudosas": [], "anidadas": []}
+    usadas = set()
+    for s in sesiones:
+        # Una sesión DENTRO de otra es una secuela de fusión en la propia BD de
+        # telemetría (medido: sesión 48 dentro de la 43). No se le inventa fila:
+        # su tramo ya está contado en la de fuera.
+        if any(o["id"] != s["id"] and o["start_time"] <= s["start_time"]
+               and o["end_time"] >= s["end_time"] for o in sesiones):
+            plan["anidadas"].append(s["id"])
+            continue
+        dentro = [f for f in filas
+                  if f["start_time"] >= s["start_time"]
+                  and (f["end_time"] or f["start_time"]) <= s["end_time"]]
+        clave = next((f for f in dentro if f["start_time"] == s["start_time"]), None)
+        if clave:
+            plan["actualizar"].append((clave["id"], s))
+        else:
+            plan["insertar"].append(s)
+        for f in dentro:
+            if clave is None or f["id"] != clave["id"]:
+                plan["borrar"].append(f["id"])
+        usadas.update(f["id"] for f in dentro)
+    plan["dudosas"] = [f["id"] for f in filas if f["id"] not in usadas]
+
+    if not dry_run:
+        for tid, s in plan["actualizar"]:
+            inicio, fin = lugares_de_sesion(con, s)
+            cc.execute("""UPDATE trips SET date=?, end_time=?, distance_km=?, duration_min=?,
+                          start_place=?, end_place=? WHERE id=?""",
+                       (s["start_time"][:10], s["end_time"], round(s["distance_km"], 2),
+                        s["driving_minutes"], inicio, fin, tid))
+        for s in plan["insertar"]:
+            inicio, fin = lugares_de_sesion(con, s)
+            cc.execute("""INSERT INTO trips (date, start_time, end_time, distance_km,
+                          duration_min, start_place, end_place) VALUES (?,?,?,?,?,?,?)""",
+                       (s["start_time"][:10], s["start_time"], s["end_time"],
+                        round(s["distance_km"], 2), s["driving_minutes"], inicio, fin))
+        for tid in plan["borrar"]:
+            cc.execute("DELETE FROM trips WHERE id=?", (tid,))
+        ctx.commit()
+    ctx.close()
+    con.close()
+    return plan
+
+
+def lugares_de_sesion(con, s):
+    """Origen y destino de una sesión: primer y último punto GPS (con caché)."""
+    pos = con.execute("SELECT lat, lon FROM positions WHERE session_id=? ORDER BY timestamp",
+                      (s["id"],)).fetchall()
+    if not pos:
+        return None, None
+    return nombre_lugar(pos[0]["lat"], pos[0]["lon"]), nombre_lugar(pos[-1]["lat"], pos[-1]["lon"])
+
+
 def _cli_lugares(limite=None, solo_vacios=True, obd_db=None, ctx_db=None):
     """`--lugares [n]`: rellena origen y destino de los viajes ya escritos en Janus.
 
@@ -818,6 +901,16 @@ if __name__ == "__main__":
             sys.exit("uso: trip_summary.py --recalc <session_id> [<session_id>...] "
                      "[--keep-aggregates]")
         _cli_recalc(ids, keep_aggregates=keep)
+    elif len(sys.argv) > 1 and sys.argv[1] == "--consolidar":
+        aplicar = "--aplicar" in sys.argv[2:]
+        plan = consolidar_janus(dry_run=not aplicar)
+        print(f"📋 plan: {len(plan['actualizar'])} filas a actualizar · "
+              f"{len(plan['insertar'])} a insertar · {len(plan['borrar'])} a borrar · "
+              f"{len(plan['dudosas'])} dudosas")
+        if plan["dudosas"]:
+            print(f"⚠️  dudosas (NO se tocan): {plan['dudosas']}")
+        print("   (dry-run: no se ha escrito nada; añade --aplicar)" if not aplicar
+              else "   ✅ aplicado")
     elif len(sys.argv) > 1 and sys.argv[1] == "--lugares":
         limite = int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2].isdigit() else None
         n, huerfanas, sin_gps = _cli_lugares(limite)
