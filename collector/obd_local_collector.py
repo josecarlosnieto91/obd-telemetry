@@ -29,6 +29,9 @@ HOME = os.environ.get("HOME", "/data/data/com.termux/files/home")
 DATA_DIR = os.path.join(HOME, "obd_data")
 DB_PATH = os.path.join(DATA_DIR, "obd_local.db")
 LOG_PATH = os.path.join(DATA_DIR, "obd_local.log")
+# El log crece ~3 KB/día y nunca se recortaba: al pasar de este tamaño se rota
+# guardando UNA generación (.old).
+LOG_MAX_BYTES = 1_000_000
 # Marca de agua del sync: último timestamp ya subido. Solo avanza si el sync
 # tuvo éxito, así que un fallo nunca pierde datos (se reenvía en el siguiente).
 WATERMARK_PATH = os.path.join(DATA_DIR, "last_synced_ts")
@@ -511,6 +514,33 @@ def toca_rescatar(fallos_seguidos, ultimo_rescate, ahora,
     return (ahora - ultimo_rescate) >= gap
 
 
+def limpiar_arranque(db_path=DB_PATH, log_path=LOG_PATH, max_bytes=LOG_MAX_BYTES):
+    """Higiene al arrancar el recolector. Devuelve las acciones hechas.
+
+    - **`.sync` huérfano**: un sync interrumpido a lo bruto (Android matando
+      Termux → el `finally` que lo borra no corre) deja ahí un SQLite de varios
+      MB. Se regenera solo en el próximo sync y su contenido ya está subido (la
+      marca de agua solo avanza con éxito), así que se puede borrar sin riesgo.
+    - **Rotación del log**: crecía sin límite (~3 KB/día). Al pasar de
+      `max_bytes` se guarda una generación `.old` y se empieza de cero.
+    """
+    hechas = []
+    huerfano = db_path + ".sync"
+    if os.path.exists(huerfano):
+        try:
+            os.remove(huerfano)
+            hechas.append("sync_huerfano")
+        except OSError:
+            pass
+    try:
+        if os.path.getsize(log_path) > max_bytes:
+            os.replace(log_path, log_path + ".old")
+            hechas.append("log_rotado")
+    except OSError:
+        pass
+    return hechas
+
+
 def revive_bridge():
     """Si el bridge no responde, lo revive sin abrir UI (guard isAlive en el
     servicio evita duplicados). Una vez por ciclo como mucho."""
@@ -896,6 +926,8 @@ def main():
         sys.exit(0)
 
     subprocess.run(["termux-wake-lock"], capture_output=True)
+    for accion in limpiar_arranque():
+        log(f"Higiene de arranque: {accion}")
     conn = db_connect()
     counter = 0
     espera = INTERVAL          # cadencia adaptativa (ver siguiente_espera)
