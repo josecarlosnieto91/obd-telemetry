@@ -25,7 +25,7 @@ from datetime import datetime, timedelta
 # datos entre sesiones y necesita recalcular con las mismas reglas que el cierre
 # de un viaje (no puede haber dos fórmulas).
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from trip_summary import recalc_session  # noqa: E402
+from trip_summary import recalc_session, consolidar_janus  # noqa: E402
 
 OBD_DB = os.path.expanduser("~/.hermes/data/obd_telemetry.db")
 CONFIG_PATH = os.path.expanduser("~/.hermes/scripts/obd_vehicle_config.json")
@@ -177,6 +177,24 @@ def main():
 
     conn.close()
     print(f"✅ Unión de viajes: {merged} fusiones" if merged else "✅ Sin sesiones que unir")
+
+    # La fusión deja en Janus las filas de los tramos absorbidos, y el panel y la
+    # consola los enseñaban como viajes sueltos (13/09: cuatro filas de 0,86 /
+    # 49,18 / 78,37 / 5,06 km en vez de una de 133,5). Se consolidan aquí, que es
+    # justo cuando aparecen. Un fallo al consolidar NO debe tumbar la fusión.
+    if merged:
+        try:
+            plan = consolidar_janus()
+            print(f"🧹 Janus consolidado: {len(plan['actualizar'])} filas al día · "
+                  f"{len(plan['borrar'])} tramos absorbidos fuera · "
+                  f"{len(plan['insertar'])} filas nuevas")
+            if plan["dudosas"]:
+                print(f"⚠️  filas dudosas en context.trips (no se tocan): {plan['dudosas']}")
+            if plan["anidadas"]:
+                print(f"⚠️  sesiones anidadas en telemetría (no se les inventa fila): "
+                      f"{plan['anidadas']}")
+        except Exception as e:
+            print(f"⚠️  no se pudo consolidar Janus: {e}")
 
 
 if __name__ == "__main__":
