@@ -44,8 +44,15 @@ CAN_CSV_PATH = os.environ.get("CAN_CSV_PATH",
     "/sdcard/Android/data/com.cassiopeia.vgatebridge/files/Download/can_readings.csv")
 SSH_KEY = os.path.join(HOME, ".ssh", "id_ed25519")
 
-INTERVAL = 30            # segundos entre ciclos
+INTERVAL = 30            # segundos entre ciclos (coche en marcha)
+IDLE_INTERVAL = 120      # coche parado: se espacia hasta aquí (ver siguiente_espera)
 SYNC_EVERY = 20           # sync cada N ciclos (~10 min con INTERVAL=30)
+# ⚠️ El rescate del bridge NO puede dispararse en cada ciclo: con el coche
+# parado eso era un `am startservice` cada 30 s, el mismo patrón que provocó
+# el incidente «The VEGATES is starting continuously». Solo tras varios fallos
+# seguidos y como mucho uno cada REVIVE_MIN_GAP segundos.
+REVIVE_AFTER_FALLOS = 3
+REVIVE_MIN_GAP = 600
 # El snapshot completo son ~3.7 MB y el enlace Tailscale tarda ~25 s: con un
 # timeout de 20 s el scp se cortaba a medias (dejaba un SQLite truncado en
 # destino → "database disk image is malformed"). 90 s da margen de sobra.
@@ -477,6 +484,33 @@ def read_bridge(with_dtcs=False, supported=None):
         return None
 
 
+def siguiente_espera(tiene_lectura, espera_actual, base=INTERVAL,
+                     maximo=IDLE_INTERVAL):
+    """Siguiente pausa del bucle (cadencia adaptativa, OPT 2026-09-17).
+
+    Con el coche parado el bridge no responde: despertar cada 30 s es trabajo
+    perdido y calor dentro del coche. Con lectura se mantiene la cadencia base;
+    sin ella se dobla (backoff) hasta el máximo. En cuanto vuelve una lectura,
+    la cadencia base se recupera al instante. Pura, para probarla sin relojes.
+    """
+    if tiene_lectura:
+        return base
+    return min(max(espera_actual * 2, base), maximo)
+
+
+def toca_rescatar(fallos_seguidos, ultimo_rescate, ahora,
+                  tras=REVIVE_AFTER_FALLOS, gap=REVIVE_MIN_GAP):
+    """¿Toca lanzar el bridge? Pura y testeable (ver REVIVE_AFTER_FALLOS).
+
+    `ultimo_rescate`/`ahora` en segundos (None si nunca se intentó).
+    """
+    if fallos_seguidos < tras:
+        return False
+    if ultimo_rescate is None:
+        return True
+    return (ahora - ultimo_rescate) >= gap
+
+
 def revive_bridge():
     """Si el bridge no responde, lo revive sin abrir UI (guard isAlive en el
     servicio evita duplicados). Una vez por ciclo como mucho."""
@@ -864,6 +898,10 @@ def main():
     subprocess.run(["termux-wake-lock"], capture_output=True)
     conn = db_connect()
     counter = 0
+    espera = INTERVAL          # cadencia adaptativa (ver siguiente_espera)
+    fallos_bridge = 0          # lectura del bridge (0 = responde)
+    ultimo_rescate = None      # epoch del último revive_bridge()
+    reading = None             # última lectura del bus (None = sin respuesta)
     # Cargar PIDs soportados conocidos (el escaneo se hace en el primer ciclo
     # que el bridge responde; luego se persiste para no repetirlo cada vez)
     supported = load_supported_pids()
@@ -896,7 +934,11 @@ def main():
         with_dtcs = (counter % SYNC_EVERY == 0)
         # Escaneo de PIDs soportados: primer ciclo (si no hay datos previos)
         # y cada 6h (360 ciclos) para refrescar. Conexión dedicada.
-        if (not supported and counter % 2 == 0) or (counter > 0 and counter % 360 == 0):
+        # Solo si el bus responde (si no, es una conexión inútil: el escaneo
+        # espera al primer ciclo con lectura).
+        if reading is not None and (
+                (not supported and counter % 2 == 0)
+                or (counter > 0 and counter % 360 == 0)):
             supported = do_pid_scan()
             if supported:
                 omitidos = [n for n, c in PIDS if c[2:] not in supported]
@@ -911,8 +953,14 @@ def main():
         if reading is None:
             # Sin respuesta del bridge: puede estar ocupado (contienda) o
             # muerto (ROM/LMKD). El guard isAlive del servicio lo ignora si
-            # ya está activo — seguro lanzarlo.
-            revive_bridge()
+            # ya está activo — seguro lanzarlo. Pero NO en cada ciclo: con el
+            # coche parado eso era un lanzamiento cada 30 s.
+            fallos_bridge += 1
+            if toca_rescatar(fallos_bridge, ultimo_rescate, time.time()):
+                revive_bridge()
+                ultimo_rescate = time.time()
+        else:
+            fallos_bridge = 0
         gps = get_gps()
 
         position = None
@@ -976,7 +1024,10 @@ def main():
                 log("Sync a Cassiopeia OK")
             # Si no hay red, silencio — se reintenta en el próximo ciclo de sync
 
-        time.sleep(INTERVAL)
+        # Cadencia adaptativa: con el coche parado se espacia hasta
+        # IDLE_INTERVAL; con lectura vuelve sola a INTERVAL.
+        espera = siguiente_espera(reading is not None, espera)
+        time.sleep(espera)
 
 
 if __name__ == "__main__":
