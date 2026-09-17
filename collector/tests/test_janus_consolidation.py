@@ -6,6 +6,7 @@ panel/consola los enseñaba como viajes sueltos y troceados. Aquí se prueba que
 consolidación deja UNA fila por sesión con sus valores, y que lo que no encaja en
 ninguna sesión NO se borra.
 """
+import json
 import os
 import sqlite3
 import sys
@@ -43,6 +44,8 @@ def bds(tmp_path, monkeypatch):
     ctx.execute("CREATE TABLE trips (id INTEGER PRIMARY KEY, date TEXT, start_time TEXT,"
                 " end_time TEXT, start_place TEXT, end_place TEXT, distance_km REAL,"
                 " duration_min INTEGER)")
+    ctx.execute("CREATE TABLE events (id INTEGER PRIMARY KEY, ts TEXT, ts_unix INTEGER,"
+                " type TEXT, value TEXT, detail TEXT)")
     for fila in ((163, "2026-09-13", "2026-09-13T17:38:07", "2026-09-13T17:44:51", 0.86, 6),
                  (164, "2026-09-13", "2026-09-13T17:46:05", "2026-09-13T19:37:49", 49.18, 111),
                  (165, "2026-09-13", "2026-09-13T19:38:50", "2026-09-13T21:12:48", 78.37, 93),
@@ -50,6 +53,12 @@ def bds(tmp_path, monkeypatch):
                  # dudosa: no la cubre ninguna sesión y no casa con ninguna
                  (999, "2026-09-01", "2026-09-01T10:00:00", "2026-09-01T10:00:00", 5.0, 1)):
         ctx.execute("INSERT INTO trips VALUES (?,?,?,?,NULL,NULL,?,?)", fila)
+    # evento del tramo absorbido (lleva los datos del TRAMO, no del viaje)
+    ctx.execute("INSERT INTO events VALUES (1,'2026-09-13T21:22:46',0,'vehiculo','viaje',?)",
+                ('{"km": 5.1, "min": 8, "avg": 30, "consumo": 4.4}',))
+    # evento de un viaje que ya no existe (ts que no casa con ninguna sesión)
+    ctx.execute("INSERT INTO events VALUES (2,'2026-09-01T10:00:00',0,'vehiculo','viaje',?)",
+                ('{"km": 5.0, "min": 1}',))
     ctx.commit()
     ctx.close()
     return str(tmp_path / "obd.db"), str(tmp_path / "ctx.db")
@@ -146,9 +155,64 @@ def test_no_inventa_fila_para_una_sesion_anidada(tmp_path, monkeypatch):
     assert plan["borrar"] == [], "y no debe borrar la fila de la sesión de fuera"
 
 
+def test_actualiza_la_fila_aunque_su_fin_esté_viejo(tmp_path, monkeypatch):
+    """La identidad de un viaje es su hora de INICIO.
+
+    Caso real: el recálculo dejó la sesión 43 acabando a las 12:46:34 y la fila de
+    Janus decía 12:47:21. Con la regla vieja («su fin debe caer dentro») se creaba
+    una fila nueva y la vieja quedaba como dudosa; ahora se actualiza la misma.
+    """
+    monkeypatch.setattr(ts, "GEOCODE_CACHE", str(tmp_path / "geo.json"))
+    monkeypatch.setattr(ts, "GEOCODE_MIN_INTERVAL", 0)
+    monkeypatch.setattr(ts, "reverse_geocode", lambda lat, lon: "Oviedo")
+    obd = sqlite3.connect(str(tmp_path / "obd.db"))
+    obd.execute("CREATE TABLE sessions (id INTEGER PRIMARY KEY, start_time TEXT,"
+                " end_time TEXT, distance_km REAL, driving_minutes INTEGER)")
+    obd.execute("CREATE TABLE positions (id INTEGER PRIMARY KEY, session_id INTEGER,"
+                " timestamp TEXT, lat REAL, lon REAL)")
+    obd.execute("INSERT INTO sessions VALUES (43,'2026-08-12T12:32:09',"
+                "'2026-08-12T12:46:34',10.01,14)")
+    obd.commit()
+    obd.close()
+    ctx = sqlite3.connect(str(tmp_path / "ctx.db"))
+    ctx.execute("CREATE TABLE trips (id INTEGER PRIMARY KEY, date TEXT, start_time TEXT,"
+                " end_time TEXT, start_place TEXT, end_place TEXT, distance_km REAL,"
+                " duration_min INTEGER)")
+    # la fila buena (fin viejo) y la que se creó de más con el mismo start_time
+    ctx.execute("INSERT INTO trips VALUES (52,'2026-08-12','2026-08-12T12:32:09',"
+                "'2026-08-12T12:47:21',NULL,NULL,9.83,10)")
+    ctx.execute("INSERT INTO trips VALUES (179,'2026-08-12','2026-08-12T12:32:09',"
+                "'2026-08-12T12:46:34',NULL,NULL,10.01,14)")
+    ctx.commit()
+    ctx.close()
+
+    plan = ts.consolidar_janus(obd_db=str(tmp_path / "obd.db"),
+                               ctx_db=str(tmp_path / "ctx.db"), dry_run=True)
+    assert [t for t, _ in plan["actualizar"]] == [52], "debe actualizar la fila 52"
+    assert plan["borrar"] == [179], "y quitar la creada de más"
+    assert plan["dudosas"] == []
+
+
+def test_consolida_tambien_los_eventos(bds):
+    """El evento del tramo absorbido pasa a llevar los datos del VIAJE, y el de un
+    viaje que ya no existe se borra (si no, la analítica de Janus cuenta doble)."""
+    obd, ctx = bds
+    ts.consolidar_janus(obd_db=obd, ctx_db=ctx, dry_run=False)
+    c = sqlite3.connect(ctx)
+    c.row_factory = sqlite3.Row
+    filas = c.execute("SELECT id, ts, detail FROM events ORDER BY id").fetchall()
+    c.close()
+    assert len(filas) == 1, "el evento huérfano debería haberse borrado"
+    d = json.loads(filas[0]["detail"])
+    assert d["km"] == 133.5 and d["min"] == 224
+    assert d["inicio"] == "Oviedo" and d["fin"] == "Oviedo"
+    assert d["consumo"] == 4.4, "no debe perder los campos que ya traía"
+
+
 def test_es_idempotente(bds):
     obd, ctx = bds
     ts.consolidar_janus(obd_db=obd, ctx_db=ctx, dry_run=False)
     plan = ts.consolidar_janus(obd_db=obd, ctx_db=ctx, dry_run=True)
     assert plan["borrar"] == [] and plan["insertar"] == []
+    assert plan["eventos_borrar"] == []
     assert len(plan["actualizar"]) == 2

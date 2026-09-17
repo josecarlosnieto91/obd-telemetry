@@ -788,7 +788,8 @@ def consolidar_janus(obd_db=None, ctx_db=None, dry_run=True):
         "WHERE end_time IS NOT NULL AND distance_km > 0 ORDER BY start_time").fetchall()
     filas = cc.execute("SELECT id, start_time, end_time FROM trips").fetchall()
 
-    plan = {"actualizar": [], "insertar": [], "borrar": [], "dudosas": [], "anidadas": []}
+    plan = {"actualizar": [], "insertar": [], "borrar": [], "dudosas": [], "anidadas": [],
+            "eventos_actualizar": [], "eventos_borrar": []}
     usadas = set()
     for s in sesiones:
         # Una sesión DENTRO de otra es una secuela de fusión en la propia BD de
@@ -798,19 +799,43 @@ def consolidar_janus(obd_db=None, ctx_db=None, dry_run=True):
                and o["end_time"] >= s["end_time"] for o in sesiones):
             plan["anidadas"].append(s["id"])
             continue
+        # La identidad de un viaje es su hora de INICIO: si el fin o los km de la
+        # fila están viejos (un recálculo cambió el fin), esa fila SIGUE siendo la
+        # del viaje y se actualiza. Exigir además que su fin cayera dentro del
+        # intervalo creaba una fila nueva y dejaba la vieja como dudosa (medido:
+        # sesión 43, fin recalculado a 12:46:34 con la fila diciendo 12:47:21).
+        clave = next((f for f in filas if f["start_time"] == s["start_time"]), None)
         dentro = [f for f in filas
-                  if f["start_time"] >= s["start_time"]
+                  if (clave is None or f["id"] != clave["id"])
+                  and f["start_time"] >= s["start_time"]
                   and (f["end_time"] or f["start_time"]) <= s["end_time"]]
-        clave = next((f for f in dentro if f["start_time"] == s["start_time"]), None)
         if clave:
             plan["actualizar"].append((clave["id"], s))
+            usadas.add(clave["id"])
         else:
             plan["insertar"].append(s)
         for f in dentro:
-            if clave is None or f["id"] != clave["id"]:
-                plan["borrar"].append(f["id"])
+            plan["borrar"].append(f["id"])
         usadas.update(f["id"] for f in dentro)
     plan["dudosas"] = [f["id"] for f in filas if f["id"] not in usadas]
+
+    # Los EVENTOS son el otro espejo del viaje en Janus (los lee la analítica de
+    # Janus). El que casa con el fin de una sesión se actualiza con los valores
+    # definitivos —el de un tramo absorbido llevaba los del tramo, no los del
+    # viaje— y el que no casa con ninguna sesión se borra: es la huella de un
+    # tramo que ya no existe.
+    fin_de_sesion = {}
+    for s in sesiones:
+        fin_de_sesion[(s["end_time"] or "")[:19]] = s
+    tiene_events = cc.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                              "AND name='events'").fetchone() is not None
+    if tiene_events:
+        for e in cc.execute("SELECT id, ts, detail FROM events WHERE value='viaje'"):
+            s = fin_de_sesion.get(e["ts"][:19])
+            if s is None:
+                plan["eventos_borrar"].append(e["id"])
+            else:
+                plan["eventos_actualizar"].append((e["id"], e["detail"], s))
 
     if not dry_run:
         for tid, s in plan["actualizar"]:
@@ -827,6 +852,18 @@ def consolidar_janus(obd_db=None, ctx_db=None, dry_run=True):
                         round(s["distance_km"], 2), s["driving_minutes"], inicio, fin))
         for tid in plan["borrar"]:
             cc.execute("DELETE FROM trips WHERE id=?", (tid,))
+        for eid, detail, s in plan["eventos_actualizar"]:
+            try:
+                d = json.loads(detail) if detail else {}
+            except ValueError:
+                d = {}
+            d["km"] = round(s["distance_km"], 1)
+            d["min"] = s["driving_minutes"]
+            d["inicio"], d["fin"] = lugares_de_sesion(con, s)
+            cc.execute("UPDATE events SET detail=? WHERE id=?",
+                       (json.dumps(d, ensure_ascii=False), eid))
+        for eid in plan["eventos_borrar"]:
+            cc.execute("DELETE FROM events WHERE id=?", (eid,))
         ctx.commit()
     ctx.close()
     con.close()
@@ -904,11 +941,15 @@ if __name__ == "__main__":
     elif len(sys.argv) > 1 and sys.argv[1] == "--consolidar":
         aplicar = "--aplicar" in sys.argv[2:]
         plan = consolidar_janus(dry_run=not aplicar)
-        print(f"📋 plan: {len(plan['actualizar'])} filas a actualizar · "
+        print(f"📋 viajes: {len(plan['actualizar'])} a actualizar · "
               f"{len(plan['insertar'])} a insertar · {len(plan['borrar'])} a borrar · "
               f"{len(plan['dudosas'])} dudosas")
+        print(f"📋 eventos: {len(plan['eventos_actualizar'])} a actualizar · "
+              f"{len(plan['eventos_borrar'])} a borrar")
         if plan["dudosas"]:
             print(f"⚠️  dudosas (NO se tocan): {plan['dudosas']}")
+        if plan["anidadas"]:
+            print(f"⚠️  sesiones anidadas (sin fila propia): {plan['anidadas']}")
         print("   (dry-run: no se ha escrito nada; añade --aplicar)" if not aplicar
               else "   ✅ aplicado")
     elif len(sys.argv) > 1 and sys.argv[1] == "--lugares":
