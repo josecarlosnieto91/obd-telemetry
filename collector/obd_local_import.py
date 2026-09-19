@@ -522,7 +522,15 @@ def main():
         shutil.move(INCOMING, os.path.join(PROCESSED_DIR, f"polar_obd_local_{stamp}.db"))
 
         if n_read or n_pos or n_dtc or n_fap or n_cal or n_can:
-            # Silencio en stdout (cron no_agent): traza a log de import.
+            # Antes esto era SILENCIO absoluto en stdout («traza a log de import»
+            # y nada más): el cron decía «silent» lo mismo si no había nada que
+            # hacer que si acababa de importar un viaje entero. Ese silencio es lo
+            # que ocultó 4 días de sync roto — la tablet acumulaba datos y en
+            # Cassiopeia no aparecía nada, sin un solo aviso.
+            # Ahora habla SOLO cuando importa algo (sigue callado si no hay nada).
+            print(f"📥 Importado: {n_read} lecturas, {n_pos} posiciones, "
+                  f"{n_can} CAN, {n_dtc} DTC, {n_fap} FAP, {n_cal} calibración "
+                  f"· sesión {session_id}")
             try:
                 with open(os.path.join(PROCESSED_DIR, "import.log"), "a") as lf:
                     lf.write(f"{datetime.datetime.now().isoformat()} "

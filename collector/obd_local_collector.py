@@ -49,7 +49,13 @@ SSH_KEY = os.path.join(HOME, ".ssh", "id_ed25519")
 
 INTERVAL = 30            # segundos entre ciclos (coche en marcha)
 IDLE_INTERVAL = 120      # coche parado: se espacia hasta aquí (ver siguiente_espera)
-SYNC_EVERY = 20           # sync cada N ciclos (~10 min con INTERVAL=30)
+SYNC_EVERY = 20           # DTCs: cada N ciclos
+# Sync a Cassiopeia: por TIEMPO, no por ciclos. Con el contador por ciclos, cada
+# arranque del recolector lo reiniciaba a 0 y con la cadencia adaptativa hacían
+# falta 40 min para llegar a 20 ciclos — más de lo que vive el proceso (202
+# arranques registrados en el log). Resultado real: desde el 17/09 no se
+# intentaba ni un sync y los viajes dejaron de llegar a Cassiopeia.
+SYNC_EVERY_MIN = 10       # minutos entre syncs
 # ⚠️ El rescate del bridge NO puede dispararse en cada ciclo: con el coche
 # parado eso era un `am startservice` cada 30 s, el mismo patrón que provocó
 # el incidente «The VEGATES is starting continuously». Solo tras varios fallos
@@ -514,6 +520,18 @@ def toca_rescatar(fallos_seguidos, ultimo_rescate, ahora,
     return (ahora - ultimo_rescate) >= gap
 
 
+def toca_sync(ultimo_sync, ahora, minutos=SYNC_EVERY_MIN):
+    """¿Toca subir a Cassiopeia? Decidido por TIEMPO, no por ciclos.
+
+    Con el contador de ciclos, cada arranque del recolector lo reiniciaba a 0:
+    con la cadencia adaptativa hacían falta 40 min para juntar 20 ciclos y el
+    proceso no vive tanto (202 arranques en el log) → desde el 17/09 no se
+    intentaba ningún sync y los viajes dejaron de llegar. Pura y testeable.
+    `ultimo_sync` = 0 al arrancar ⇒ se intenta uno en el primer ciclo.
+    """
+    return (ahora - ultimo_sync) >= minutos * 60
+
+
 def limpiar_arranque(db_path=DB_PATH, log_path=LOG_PATH, max_bytes=LOG_MAX_BYTES):
     """Higiene al arrancar el recolector. Devuelve las acciones hechas.
 
@@ -933,6 +951,7 @@ def main():
     espera = INTERVAL          # cadencia adaptativa (ver siguiente_espera)
     fallos_bridge = 0          # lectura del bridge (0 = responde)
     ultimo_rescate = None      # epoch del último revive_bridge()
+    ultimo_sync = 0            # 0 ⇒ se intenta un sync en el primer ciclo
     reading = None             # última lectura del bus (None = sin respuesta)
     # Cargar PIDs soportados conocidos (el escaneo se hace en el primer ciclo
     # que el bridge responde; luego se persiste para no repetirlo cada vez)
@@ -1051,7 +1070,10 @@ def main():
         counter += 1
         # Importar consumo CAN del CSV (CanSnifferService) antes del sync
         import_can_csv(conn)
-        if counter % SYNC_EVERY == 0:
+        # Sync por TIEMPO (ver SYNC_EVERY_MIN): inmune a los reinicios del
+        # recolector, que era lo que dejaba los viajes sin subir.
+        if toca_sync(ultimo_sync, time.time()):
+            ultimo_sync = time.time()
             if sync_to_cassiopeia():
                 log("Sync a Cassiopeia OK")
             # Si no hay red, silencio — se reintenta en el próximo ciclo de sync

@@ -240,3 +240,46 @@ def test_dos_syncs_consecutivos_no_pierden_ninguna_fila(coll, monkeypatch):
     assert "2027-01-01T10:00:30" in ts and "2027-01-01T14:00:00" in ts, \
         "el segundo sync debe traer todo lo posterior a la marca"
     assert "2027-01-01T10:00:00" in ts, "con solape, la fila de la marca se reenvía"
+
+
+# ── Cadencia del sync: por TIEMPO, no por ciclos (fix 2026-09-19) ────────────
+#
+# El sync estaba condicionado a `counter % 20 == 0` y el contador se reinicia en
+# cada arranque del recolector. Con la cadencia adaptativa hacían falta 40 min
+# para juntar 20 ciclos: más de lo que vive el proceso (202 arranques en el log).
+# Resultado real: desde el 17/09 no se intentaba NINGÚN sync y los viajes
+# dejaron de llegar a Cassiopeia sin un solo error en el log.
+
+def test_al_arrancar_se_intenta_un_sync():
+    """ultimo_sync=0 ⇒ el primer ciclo sube: así un reinicio no deja días sin subir."""
+    mod = _load()
+    assert mod.toca_sync(0, 1_700_000_000) is True
+
+
+def test_no_sincroniza_antes_del_plazo():
+    mod = _load()
+    ahora = 1_700_000_000
+    assert mod.toca_sync(ahora - 9 * 60, ahora) is False
+
+
+def test_sincroniza_al_cumplir_el_plazo():
+    mod = _load()
+    ahora = 1_700_000_000
+    assert mod.toca_sync(ahora - mod.SYNC_EVERY_MIN * 60, ahora) is True
+    assert mod.toca_sync(ahora - 60 * 60, ahora) is True   # muy pasado: también
+
+
+def test_el_plazo_es_de_minutos_no_de_ciclos():
+    mod = _load()
+    assert mod.SYNC_EVERY_MIN == 10
+    assert mod.SYNC_EVERY_MIN * 60 < mod.IDLE_INTERVAL * mod.SYNC_EVERY, \
+        "el sync debe llegar antes de agotar los ciclos que antes hacían falta"
+
+
+def test_el_bucle_ya_no_cuenta_ciclos_para_sincronizar():
+    fuente = open(os.path.join(COLLECTOR_DIR, "obd_local_collector.py")).read()
+    assert "if toca_sync(ultimo_sync, time.time()):" in fuente
+    # El contador de ciclos ya solo gobierna los DTCs, no el sync
+    assert "with_dtcs = (counter % SYNC_EVERY == 0)" in fuente
+    # ...y que no quede ningún sync colgado del contador de ciclos
+    assert "if counter % SYNC_EVERY == 0:" not in fuente
