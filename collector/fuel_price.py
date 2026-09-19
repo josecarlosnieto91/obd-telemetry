@@ -59,8 +59,13 @@ def _load_cache():
 
 def _save_cache(data):
     try:
-        with open(CACHE_PATH, "w") as fh:
+        # Atómico: si se muere a mitad del dump, el JSON de caché quedaba truncado y
+        # `_load_cache` (que traga cualquier excepción) devolvía None → descarga entera
+        # de ~12 MB del Ministerio en el siguiente ciclo.
+        tmp = CACHE_PATH + ".tmp"
+        with open(tmp, "w") as fh:
             json.dump(data, fh)
+        os.replace(tmp, CACHE_PATH)
     except Exception:
         pass
 

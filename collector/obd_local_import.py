@@ -550,6 +550,23 @@ def main():
                                  f"CORRUPT moved to corrupt/ ({error})\n")
                 except Exception:
                     pass
+                # El fichero corrupto NO se pierde (queda en corrupt/ para recuperación
+                # manual), pero esto salía en silencio absoluto: si la tablet empieza a
+                # subir basura, el sync "va bien" y simplemente no hay datos nuevos. Se
+                # avisa por stdout para que quede en el output del job, con el acumulado.
+                n_total = n_recientes = 0
+                try:
+                    ahora = datetime.datetime.now().timestamp()
+                    for f in os.listdir(corrupt_dir):
+                        p = os.path.join(corrupt_dir, f)
+                        if os.path.isfile(p):
+                            n_total += 1
+                            if ahora - os.path.getmtime(p) <= 7 * 86400:
+                                n_recientes += 1
+                except Exception:
+                    pass
+                print(f"⚠️ BD entrante corrupta ({error}) → movida a corrupt/ "
+                      f"[{n_total} en total, {n_recientes} en los últimos 7 días]")
             except Exception as move_error:
                 print(f"ERROR import: {error} (y no se pudo mover: {move_error})",
                       file=sys.stderr)

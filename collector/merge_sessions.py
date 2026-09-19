@@ -33,6 +33,16 @@ CONFIG_PATH = os.path.expanduser("~/.hermes/scripts/obd_vehicle_config.json")
 MERGE_GAP_MINUTES = 15.0
 MAX_GEO_KM = 2.0
 
+# Tabla de deshacer. La fusión BORRA la sesión absorbida y no hay vuelta atrás, pero
+# las heurísticas (hueco + continuidad GPS + geografía) pueden equivocarse — este mismo
+# fichero documenta el caso real de "22 km a 120 km/h en 11 min" y los pares fantasma
+# 152/160. Un falso positivo se llevaba por delante un viaje real sin dejar rastro y el
+# job corre cada 5 minutos, así que la fila se guarda ENTERA aquí antes de borrarla:
+# reconstruirla es un INSERT del payload.
+UNDO_TABLE = "sessions_merged_undo"
+UNDO_RETENTION_DAYS = 90
+MAX_MERGE_PASSES = 50  # tope del bucle de fusiones (no puede girar sin fin)
+
 
 def load_config():
     try:
@@ -95,10 +105,24 @@ def main():
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
 
+    # Tabla de deshacer + su retención (ver UNDO_TABLE arriba)
+    c.execute(f"""CREATE TABLE IF NOT EXISTS {UNDO_TABLE} (
+        ts TEXT NOT NULL,
+        dropped_id INTEGER NOT NULL,
+        kept_id INTEGER NOT NULL,
+        gap_min REAL,
+        n_readings INTEGER,
+        payload TEXT NOT NULL)""")
+    c.execute(f"DELETE FROM {UNDO_TABLE} WHERE ts < ?",
+              ((datetime.now() - timedelta(days=UNDO_RETENTION_DAYS)).isoformat(timespec="seconds"),))
+    conn.commit()
+
     merged = 0
     changed = True
-    while changed:
+    passes = 0
+    while changed and passes < MAX_MERGE_PASSES:
         changed = False
+        passes += 1
         # Sesiones completadas ordenadas por start_time
         rows = c.execute(
             "SELECT id, start_time, end_time, distance_km, driving_minutes "
@@ -163,6 +187,18 @@ def main():
                 "UPDATE sessions SET end_time=?, distance_km=?, driving_minutes=? "
                 "WHERE id=?",
                 (drop["end_time"], round(dist, 2), mins, keep["id"]))
+            # Copia de deshacer ANTES del borrado (ver UNDO_TABLE): si esta fusión es
+            # un falso positivo, la fila original queda recuperable.
+            fila = c.execute("SELECT * FROM sessions WHERE id=?",
+                             (drop["id"],)).fetchone()
+            if fila is not None:
+                c.execute(
+                    f"INSERT INTO {UNDO_TABLE} "
+                    "(ts, dropped_id, kept_id, gap_min, n_readings, payload) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (datetime.now().isoformat(timespec="seconds"), drop["id"],
+                     keep["id"], gap, n_read,
+                     json.dumps(dict(fila), ensure_ascii=False, default=str)))
             c.execute("DELETE FROM sessions WHERE id=?", (drop["id"],))
             conn.commit()
             # La fusión mueve los datos, pero NO recalcula: sin esto la sesión

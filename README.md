@@ -72,6 +72,14 @@ conector OBD-II y a cualquier adaptador ELM327 Bluetooth**.
 Todo lo específico del vehículo vive en `obd_vehicle_config.json`
 (copia en `docs/obd_vehicle_config.example.json`):
 
+> ⚠️ **Dónde vive la config de verdad**: la que leen los scripts de Cassiopeia es
+> `~/.hermes/scripts/obd_vehicle_config.json` (car_status, trip_summary, refuel_detector,
+> merge_sessions, obd_local_import, fuel_price). La copia `collector/obd_vehicle_config.json`
+> de este repo y la de la tablet (`~/obd_vehicle_config.json`) son copias de trabajo, no la
+> operativa: editar solo la del repo **no cambia nada** y las dos se desincronizan.
+> El fichero real no se versiona (este repo es público); la plantilla pública es
+> `docs/obd_vehicle_config.example.json`.
+
 | Campo | Efecto |
 |-------|--------|
 | `fuel_type` | diesel / gasoline (semántico) |

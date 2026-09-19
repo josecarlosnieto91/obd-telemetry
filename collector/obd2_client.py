@@ -4,10 +4,19 @@ OBD2 Client for VgateBridge TCP tunnel.
 Connects to vehicle tablet's VgateBridge TCP server and reads OBD2 data.
 """
 import json
+import os
 import socket
-import obd
 import sys
 import time
+
+# Dependencia externa: python-obd. Este cliente es LEGADO — lo sustituyó VgateBridge +
+# el recolector `polar-star`, no lo invoca ningún cronjob y python-obd no está instalado
+# en Cassiopeia, así que importarlo aquí falla. Se deja el import tal cual (es su
+# dependencia real) para no fingir que el fichero funciona sin ella.
+try:
+    import obd  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover - legado
+    obd = None
 
 # ── Configuración: host/puerto del puente OBD ──────────────────
 # Se leen de ~/.hermes/config/polar_star.json. Nada de IPs ni dominios
@@ -39,6 +48,10 @@ class TcpSerial:
         return 0
 
 def main():
+    if obd is None:
+        print("❌ Este cliente necesita python-obd, que no está instalado. Es legado: "
+              "para leer el coche usa el recolector polar-star (VgateBridge).")
+        return 1
     print(f"🔌 Conectando a VgateBridge @ {POLAR_STAR_HOST}:{POLAR_STAR_PORT}...")
     sys.stdout.flush()
     

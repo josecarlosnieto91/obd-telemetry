@@ -27,6 +27,11 @@ SCP="${OBD_SCP:-scp}"
 TS="${OBD_TAILSCALE:-tailscale}"
 LOG="${OBD_LOG:-$HOME/.hermes/logs/redeploy_obd.log}"
 OPTS=(-o ConnectTimeout=10 -o BatchMode=yes)
+# `timeout` en TODA llamada remota: una tablet que responde al ssh y luego se cuelga a
+# mitad de la transferencia dejaba el job colgado hasta que el scheduler lo matara (y con
+# él el resto de la cadena de los 5 min). Con timeout, el ciclo siguiente lo reintenta.
+# OBD_TIMEOUT permite ajustarlo; el fichero es pequeño, 90 s es de sobra.
+TO=(timeout "${OBD_TIMEOUT:-90}")
 
 # ¿Tablet online en tailscale? Si no aparece o está "offline", no intentar SSH.
 ts_line="$("$TS" status 2>/dev/null | grep "$HOST" || true)"
@@ -38,7 +43,7 @@ md5_local="$(md5sum "$SCRIPT_SRC" | awk '{print $1}')"
 # Una sola ida y vuelta que distingue los tres casos: hash / AUSENTE / sin
 # respuesta (sshd en pausa). Sin esto, un fichero que no existe en la tablet se
 # confundía con "sshd mudo" y no se instalaba nunca.
-remoto="$("$SSH" "${OPTS[@]}" "$HOST" \
+remoto="$("${TO[@]}" "$SSH" "${OPTS[@]}" "$HOST" \
           "test -f $DEST && md5sum $DEST || echo AUSENTE" 2>/dev/null | awk '{print $1}')"
 
 if [ -z "$remoto" ]; then
@@ -49,20 +54,20 @@ if [ "$remoto" != "AUSENTE" ] && [ "$md5_local" = "$remoto" ]; then
     exit 0   # ya está al día — silencio
 fi
 
-if ! "$SCP" "${OPTS[@]}" "$SCRIPT_SRC" "$HOST:$DEST" 2>/dev/null; then
+if ! "${TO[@]}" "$SCP" "${OPTS[@]}" "$SCRIPT_SRC" "$HOST:$DEST" 2>/dev/null; then
     echo "$(date '+%F %T') scp falló; se reintenta en el próximo ciclo" >> "$LOG"
     exit 0
 fi
 
 # Verificación en destino: subir no es desplegar.
-md5_destino="$("$SSH" "${OPTS[@]}" "$HOST" "md5sum $DEST" 2>/dev/null | awk '{print $1}')"
+md5_destino="$("${TO[@]}" "$SSH" "${OPTS[@]}" "$HOST" "md5sum $DEST" 2>/dev/null | awk '{print $1}')"
 if [ "$md5_destino" != "$md5_local" ]; then
     echo "$(date '+%F %T') md5 en destino NO coincide tras subir ($md5_destino != $md5_local)" >> "$LOG"
     exit 0
 fi
 
 # El proceso viejo sigue en memoria: matarlo para que crond lance el nuevo.
-"$SSH" "${OPTS[@]}" "$HOST" "pkill -f '[o]bd_local_collector.py'" 2>/dev/null
+"${TO[@]}" "$SSH" "${OPTS[@]}" "$HOST" "pkill -f '[o]bd_local_collector.py'" 2>/dev/null
 
 echo "🔧 Recolector OBD actualizado en la tablet (md5 ${md5_local:0:8})"
 echo "$(date '+%F %T') recolector desplegado (md5 $md5_local)" >> "$LOG"

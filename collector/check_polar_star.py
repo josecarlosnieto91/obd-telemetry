@@ -10,7 +10,7 @@ Notifica cuando:
 
 Cada arranque → nuevo track GPS en ~/.hermes/data/tracks/
 """
-import os, json, time, subprocess, math
+import os, json, sys, time, subprocess, math
 from datetime import datetime
 
 STATE_FILE = os.path.expanduser("~/.hermes/data/polar_star_state.json")
@@ -18,8 +18,17 @@ TRACK_DIR = os.path.expanduser("~/.hermes/data/tracks")
 
 # Configuración propia — ~/.hermes/config/polar_star.json
 def load_cfg():
-    with open(os.path.expanduser("~/.hermes/config/polar_star.json")) as f:
-        return json.load(f)
+    ruta = os.path.expanduser("~/.hermes/config/polar_star.json")
+    try:
+        with open(ruta) as f:
+            return json.load(f)
+    except (OSError, ValueError) as e:
+        # Antes esto reventaba en el import con un traceback de dos pantallas. El config
+        # es imprescindible (ssh, radio de casa): o se dice qué falta y dónde, o el job
+        # falla cada 5 minutos sin explicar por qué.
+        print(f"⚠️ Polar Star: no se puede leer {ruta} ({e}). Sin ese fichero no hay "
+              f"SSH ni radio de casa; revísalo (el job no puede seguir).")
+        sys.exit(1)
 
 CFG = load_cfg()
 SSH_CMD = ["ssh", "-o", "ConnectTimeout=8", "-o", "StrictHostKeyChecking=no",
@@ -52,8 +61,13 @@ def load_state():
 
 def save_state(s):
     os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
-    with open(STATE_FILE, "w") as f:
+    # Escritura atómica: con open("w") directo, morir a mitad del dump dejaba el JSON
+    # truncado y load_state() caía a los valores por defecto (se perdía el track en
+    # curso y los avisos de arranque/llegada ya dados).
+    tmp = STATE_FILE + ".tmp"
+    with open(tmp, "w") as f:
         json.dump(s, f)
+    os.replace(tmp, STATE_FILE)
 
 def run_ssh(cmd_list):
     full_cmd = SSH_CMD + cmd_list

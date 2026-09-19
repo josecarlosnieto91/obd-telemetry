@@ -23,7 +23,12 @@ GPS_INTERVAL = 20          # seconds between GPS reads
 STOP_TIMEOUT = 900         # seconds stopped before ending track (15 min, coherente con trip_summary)
 JOIN_TIMEOUT_MIN = 15      # gap < 15 min desde la última posición → continuar MISMO track al arrancar
 MOVE_THRESHOLD = 20        # meters to consider "moving"
-CASSIOPEIA = "user@server"   # MagicDNS — no IP hardcodeada
+CASSIOPEIA = "user@server"   # ⚠️ PLACEHOLDER: sin configurar (ver nota)
+# Este logger corre EN la tablet y subiría los GPX a Cassiopeia, pero el destino nunca se
+# configuró, así que `sync_to_server` falla en silencio y no sube nada. El trackeo real lo
+# hace `check_polar_star.py` desde Cassiopeia (dirección inversa: es él quien entra por SSH
+# en el móvil). Si algún día se reactiva esto, aquí va el host MagicDNS de Cassiopeia y
+# NUNCA una IP.
 CASSIOPEIA_PATH = "~/.hermes/data/tracks"
 SSH_KEY = os.path.join(HOME, ".ssh", "id_ed25519")
 
