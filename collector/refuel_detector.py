@@ -75,7 +75,11 @@ def main():
     # surtidor real (54,35 L → 973 km de salto = 17,90 km/L), así que la
     # reserva (~5,6 L con rango a 0) YA queda absorbida en el factor.
 
-    conn = sqlite3.connect(OBD_DB)
+    # Mismo motivo que en merge_sessions: la BD la escriben varios jobs a la vez (este corre
+    # cada 10 min) y sin busy_timeout un choque se convierte en un fallo inmediato.
+    conn = sqlite3.connect(OBD_DB, timeout=10.0)
+    conn.execute("PRAGMA busy_timeout=10000")
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
 
@@ -239,7 +243,8 @@ def main():
 
     if reports:
         try:
-            ctx = sqlite3.connect(CTX_DB)
+            ctx = sqlite3.connect(CTX_DB, timeout=10.0)
+            ctx.execute("PRAGMA busy_timeout=10000")
             cc = ctx.cursor()
             for r in reports:
                 detail = json.dumps({

@@ -86,7 +86,12 @@ def main():
     gap_min = float(thr.get("trip_merge_gap_min", MERGE_GAP_MINUTES))
     geo_km = float(thr.get("trip_merge_geo_km", MAX_GEO_KM))
 
-    conn = sqlite3.connect(OBD_DB)
+    # Las otras piezas del collector (trip_summary, obd_local_import, car_status) abren la
+    # BD con busy_timeout + WAL. Sin esto, con 5-6 jobs escribiendo cada 5 minutos este
+    # podía saltar con "database is locked" a mitad del bucle de fusiones.
+    conn = sqlite3.connect(OBD_DB, timeout=10.0)
+    conn.execute("PRAGMA busy_timeout=10000")
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
 
