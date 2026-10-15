@@ -12,6 +12,7 @@ import importlib.util
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 
@@ -68,6 +69,36 @@ def test_sin_variables_jinja_sin_renderizar(client, ruta):
     html = client.get(ruta).get_data(as_text=True)
     restos = re.findall(r"\{\{.*?\}\}|\{%.*?%\}", html)
     assert not restos, f"{ruta}: quedaron expresiones Jinja sin renderizar: {restos[:3]}"
+
+
+def test_confirmar_litros_conserva_los_decimales_del_surtidor(client, tmp_path,
+                                                             monkeypatch):
+    """Confirmar los litros de un repostaje NO puede redondear a un decimal.
+
+    Regresión del 2026-10-15: el endpoint hacía `round(litros, 1)`, así que un
+    surtidor que da 49,16 L quedaba guardado como 49,2 L y el coste salía 7
+    céntimos por encima del ticket. Es la misma clase de fallo que ya se arregló
+    en /api/refuels/manual (9,98 L → 10,0 L) y que aquí había quedado sin tocar.
+    """
+    mod = sys.modules["webapp_under_test"]
+    db = tmp_path / "refuels.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE refuels (id INTEGER PRIMARY KEY, ts TEXT, "
+                "liters REAL, price_per_l REAL, cost REAL, station TEXT)")
+    con.execute("INSERT INTO refuels (id, ts, liters, price_per_l) "
+                "VALUES (112, '2026-10-15T12:18:51', 44.7, 1.827)")
+    con.commit()
+    con.close()
+    monkeypatch.setattr(mod, "DB_PATH", str(db))
+
+    r = client.post("/api/refuels/112/liters", json={"liters": 49.16})
+    assert r.status_code == 200, r.get_data(as_text=True)
+    assert r.get_json() == {"ok": True, "liters": 49.16, "cost": 89.82,
+                            "price_per_l": 1.827}
+
+    fila = sqlite3.connect(db).execute(
+        "SELECT liters, cost FROM refuels WHERE id = 112").fetchone()
+    assert fila == (49.16, 89.82), f"guardado redondeado: {fila}"
 
 
 def test_hoja_de_estilo_sellada_con_su_fecha(client):
