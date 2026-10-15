@@ -454,13 +454,16 @@ def api_refuel_liters(rid):
         return jsonify({"error": "refuel not found"}), 404
     price = row["price_per_l"]
     cost = round(litros * price, 2) if price else None
+    # Dos decimales, no uno: el surtidor da 49,16 L y redondear a 49,2 falsea
+    # el coste y los litros del depósito. Mismo defecto que se arregló en
+    # /api/refuels/manual el 2026-08-22 y que aquí había quedado sin tocar.
     c.execute(
         "UPDATE refuels SET liters=?, cost=? WHERE id=?",
-        (round(litros, 1), cost, rid),
+        (round(litros, 2), cost, rid),
     )
     conn.commit()
     conn.close()
-    return jsonify({"ok": True, "liters": round(litros, 1), "cost": cost, "price_per_l": price})
+    return jsonify({"ok": True, "liters": round(litros, 2), "cost": cost, "price_per_l": price})
 
 
 @app.route("/api/refuels/manual", methods=["POST"])
