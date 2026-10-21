@@ -1,0 +1,2 @@
+# Exenciones del guardián de higiene, cada una con su motivo.
+collector/obd_local_collector.py  # usuario de SSH al nodo Cassiopeia: es el destino real del recolector

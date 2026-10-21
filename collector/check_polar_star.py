@@ -1,4 +1,4 @@
-#!/home/josecnr91/.hermes/hermes-agent/venv/bin/python3
+#!/usr/bin/env python3
 """
 Polar Star — detecta arranque, llegada a casa y guarda tracks GPS.
 
@@ -135,7 +135,7 @@ def save_track_gpx(points, start_time):
     dt = datetime.fromtimestamp(start_time)
     fname = f"track_{dt.strftime('%Y%m%d_%H%M%S')}.gpx"
     fpath = os.path.join(TRACK_DIR, fname)
-    
+
     with open(fpath, "w") as f:
         f.write(gpx_header())
         for pt in points:
@@ -144,17 +144,17 @@ def save_track_gpx(points, start_time):
         f.write("\n")
         f.write(gpx_footer())
         f.write("\n")
-    
+
     # Also save a compact JSON summary
     total_dist = 0
     for i in range(1, len(points)):
         total_dist += haversine(points[i-1]["lat"], points[i-1]["lon"],
                                 points[i]["lat"], points[i]["lon"])
-    
+
     end_time = points[-1]["ts"] if points else start_time
     duration = end_time - start_time
     n_points = len(points)
-    
+
     summary = {
         "file": fname,
         "date": dt.strftime("%Y-%m-%d"),
@@ -163,11 +163,11 @@ def save_track_gpx(points, start_time):
         "distance_m": total_dist,
         "points": n_points
     }
-    
+
     summary_path = fpath.replace(".gpx", ".json")
     with open(summary_path, "w") as f:
         json.dump(summary, f, indent=2)
-    
+
     return fname, summary
 
 def format_track_summary(summary):
@@ -245,7 +245,7 @@ def main():
             if last_pt:
                 dist = haversine(last_pt["lat"], last_pt["lon"], lat, lon)
                 moved = dist > MIN_MOVE_METERS
-            
+
             if moved:
                 pt = {
                     "lat": lat, "lon": lon,
@@ -312,7 +312,7 @@ def main():
             fname, summary = save_track_gpx(track_points, track_start)
             print(f"📍 **Trayecto completado** (desconexión)")
             print(format_track_summary(summary))
-        
+
         if not was_unreachable:
             state["last_unreachable"] = now
         state["track_active"] = False
