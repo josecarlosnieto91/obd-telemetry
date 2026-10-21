@@ -1,0 +1,23 @@
+# Puertas locales de obd-telemetry. Añadido el 2026-10-21.
+# Lo lanza el hook global (~/.hermes/git-hooks/pre-commit) en cada confirmación, sobre los
+# ficheros preparados. El guardián de secretos y datos personales NO vive aquí: se ejecuta
+# siempre desde el hook global, haya config o no.
+exclude: |
+  (?x)^(
+    vendor/|node_modules/|\.venv/|venv/|dist/|build/|__pycache__/|release/|releases/|
+    .*\.(png|jpe?g|gif|webp|ico|pdf|zip|gz|tgz|age|mo|pot|woff2?|ttf|eot|mp3|mp4|ogg|wav|
+         apk|aab|jar|so|a|db|sqlite|pyc|min\.js|min\.css)
+  )$
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+      - id: check-yaml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=2048"]
+      - id: check-case-conflict
