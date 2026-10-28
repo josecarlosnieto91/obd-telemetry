@@ -90,7 +90,7 @@ function tipHTML(a) {
             <span>${icon} ${a.message}</span>
             <button class="tip-dismiss" onclick="dismissTip(${a.id}, this.closest('li'))" title="Marcar como resuelto">✕</button>
         </span>
-        <span class="muted" style="font-size:0.75em;">${ts}</span>
+        <span class="muted">${ts}</span>
     </li>`;
 }
 
@@ -145,7 +145,16 @@ async function loadFap() {
         const r = await fetch('/api/fap');
         const events = await r.json();
         const el = document.getElementById('fap-container');
-        if (!events.length) return;
+        if (!events.length) {
+            // Sin eventos no puede quedarse el texto genérico de arriba: hay
+            // que decir cuántos datos hay detrás, porque 0 detecciones en tres
+            // meses es en sí mismo un dato (umbral o motor que no regenera).
+            el.innerHTML = `<p class="muted">Ninguna regeneración detectada en el histórico.
+                La heurística busca ralentí elevado sostenido con MAF alto; si el motor
+                no alcanza temperatura de servicio, la regeneración no llega a producirse.</p>
+                <p class="muted"><a href="/consumo">Ver temperatura y consumo en el tiempo →</a></p>`;
+            return;
+        }
         el.innerHTML = events.map(e => {
             const start = new Date(e.start_ts).toLocaleString('es');
             const dur = e.duration_min ? `${e.duration_min.toFixed(0)} min` : '?';
@@ -214,7 +223,7 @@ async function loadMaintenance() {
         }
         window.CURRENT_KM = d.odometer_km;
         el.innerHTML = d.maintenance.map(maintHTML).join('')
-            + `<p class="muted" style="margin-top:10px;font-size:0.8em;">Odómetro actual: ${Math.round(d.odometer_km).toLocaleString('es')} km</p>`;
+            + `<p class="muted" style="margin-top:10px;">Odómetro actual: ${Math.round(d.odometer_km).toLocaleString('es')} km</p>`;
     } catch(e) {
         document.getElementById('maint-container').innerHTML = '<p class="muted">Error cargando mantenimiento.</p>';
     }

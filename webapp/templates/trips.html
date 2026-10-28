@@ -4,9 +4,20 @@
 {% block content %}
 <div class="page">
     <h1>Historial de Viajes</h1>
+    <div class="filter-bar">
+        <label class="muted" for="f-desde">Desde</label>
+        <input type="date" id="f-desde">
+        <label class="muted" for="f-hasta">Hasta</label>
+        <input type="date" id="f-hasta">
+        <button class="btn" onclick="aplicarFechas()">Filtrar</button>
+        <button class="btn" onclick="limpiarFechas()">Todo</button>
+        <span class="muted" id="trips-resumen"></span>
+    </div>
     <div id="trips-list">
         <p class="muted">Cargando viajes...</p>
     </div>
+    <p style="margin-top:12px;"><button class="btn" id="mas-trips" style="display:none"
+        onclick="loadTrips(false)">Cargar más viajes</button></p>
 </div>
 
 <!-- Trip detail modal -->
@@ -30,9 +41,27 @@ function fmtDate(ts) {
     });
 }
 
-async function loadTrips() {
-    const r = await fetch('/api/trips');
-    const trips = await r.json();
+let viajes = [];
+const PAGINA_VIAJES = 50;
+
+async function loadTrips(reiniciar = true) {
+    // Filtros de fecha (el API los acepta desde el goal de 2026-10) y paginación
+    // de 50 en 50: traer 200 de golpe dejaba la página en 9.282 px en un móvil.
+    const desde = document.getElementById('f-desde')?.value;
+    const hasta = document.getElementById('f-hasta')?.value;
+    const offset = reiniciar ? 0 : viajes.length;
+    const q = new URLSearchParams({ limit: PAGINA_VIAJES, offset: offset });
+    if (desde) q.set('from', desde);
+    if (hasta) q.set('to', hasta);
+    const r = await fetch('/api/trips?' + q.toString());
+    const nuevos = await r.json();
+    const total = parseInt(r.headers.get('X-Total-Count') || String(nuevos.length), 10);
+    viajes = reiniciar ? nuevos : viajes.concat(nuevos);
+    const trips = viajes;
+    const resumen = document.getElementById('trips-resumen');
+    if (resumen) resumen.textContent = `mostrando ${trips.length} de ${total}`;
+    const mas = document.getElementById('mas-trips');
+    if (mas) mas.style.display = trips.length < total ? 'inline-block' : 'none';
     const el = document.getElementById('trips-list');
 
     if (trips.length === 0) {
@@ -47,7 +76,10 @@ async function loadTrips() {
     for (const t of trips) {
         const start = fmtDate(t.start_time);
         const dur = t.driving_minutes ? `${t.driving_minutes} min` : '—';
-        const dist = t.distance_km ? `${t.distance_km.toFixed(1)} km` : '—';
+        // 12 sesiones quedaron con distance_km = 0 (arranque sin movimiento):
+        // se dicen como tales en vez de un «—» que parece un fallo.
+        const dist = t.distance_km ? `${t.distance_km.toFixed(1)} km`
+            : (t.status === 'completed' ? '<span class="muted">sin mov.</span>' : '—');
         const maxSpd = t.max_speed ? `${t.max_speed.toFixed(0)} km/h` : '—';
         const avgSpd = t.avg_speed ? `${t.avg_speed.toFixed(0)} km/h` : '—';
         const maxRpm = t.max_rpm ? `${t.max_rpm.toFixed(0)} rpm` : '—';
@@ -155,6 +187,16 @@ async function showTrip(id) {
             });
         }, 100);
     }
+}
+
+function aplicarFechas() {
+    loadTrips();
+}
+
+function limpiarFechas() {
+    document.getElementById('f-desde').value = '';
+    document.getElementById('f-hasta').value = '';
+    loadTrips();
 }
 
 function closeModal() {

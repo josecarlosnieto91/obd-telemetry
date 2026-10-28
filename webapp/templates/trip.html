@@ -88,6 +88,31 @@ async function cargar() {
 
     el.innerHTML = partes.join('');
 
+    // Comparativa con viajes parecidos (misma velocidad media ±12 km/h): un
+    // consumo sin referencia no dice nada. Solo con cifras del mismo origen.
+    try {
+        const rr = await fetch('/api/trips?limit=200');
+        const todos = await rr.json();
+        const tipo = todos.filter(x => x.id !== TRIP_ID
+            && x.avg_speed && t.avg_speed
+            && Math.abs(x.avg_speed - t.avg_speed) <= 12
+            && (x.distance_km || 0) > 3
+            && x.consumo_origen === 'real');
+        if (tipo.length >= 3 && t.real_l100) {
+            const media = tipo.reduce((a, x) => a + x.consumo_l100, 0) / tipo.length;
+            const dif = t.real_l100 - media;
+            const signo = dif >= 0 ? '+' : '';
+            el.insertAdjacentHTML('beforeend', `<div class="card">
+                <h2>Comparado con viajes parecidos</h2>
+                <p>Media de ${tipo.length} viajes de velocidad similar:
+                   <b>${media.toFixed(1)} l/100 km</b> · este viaje
+                   <b>${Number(t.real_l100).toFixed(1)}</b>
+                   (${signo}${dif.toFixed(1)} l/100 km).</p>
+                <p class="muted">Solo se comparan viajes con consumo real de surtidor.</p>
+            </div>`);
+        }
+    } catch (e) { /* la comparativa es un extra: si falla, no rompe la ficha */ }
+
     if (d.readings && d.readings.length > 1) {
         const ctx = document.getElementById('chartViaje').getContext('2d');
         new Chart(ctx, {

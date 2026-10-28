@@ -131,3 +131,38 @@ def test_alerts_pagina_y_filtra(client):
     assert len(r.get_json()) == 5
     assert r.headers["X-Total-Count"] == "195"
     assert r.headers["X-Offset"] == "190"
+
+
+# ── PWA y metadatos ───────────────────────────────────────────
+
+def test_manifest_es_instalable(client):
+    r = client.get("/manifest.webmanifest")
+    assert r.status_code == 200
+    d = r.get_json()
+    assert d["start_url"] and d["display"] == "standalone" and d["icons"]
+    assert d["lang"] == "es"
+
+
+def test_service_worker_sirve_js_y_no_cachea_apis():
+    """El SW cachea páginas y estáticos, NUNCA /api/: un dato viejo servido como
+    actual es peor que un error visible."""
+    mod = sys.modules["webapp_under_test"]
+    app = mod.app
+    app.config["TESTING"] = True
+    with app.test_client() as cli:
+        r = cli.get("/sw.js")
+    assert r.status_code == 200
+    assert "application/javascript" in r.headers["Content-Type"]
+    cuerpo = r.get_data(as_text=True)
+    assert "startsWith('/api/')" in cuerpo, "el SW no excluye las APIs del cache"
+    assert "caches.open" in cuerpo
+
+
+def test_etag_permite_no_repetir_respuestas(client):
+    """El dashboard sondea cada 5 s: con ETag, lo que no cambió no se reenvía."""
+    r1 = client.get("/api/alerts?limit=5")
+    etag = r1.headers.get("ETag")
+    assert etag, "las APIs deberían llevar ETag"
+    r2 = client.get("/api/alerts?limit=5", headers={"If-None-Match": etag})
+    assert r2.status_code == 304
+    assert r2.get_data() == b""

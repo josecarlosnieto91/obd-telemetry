@@ -60,11 +60,28 @@ conector OBD-II y a cualquier adaptador ELM327 Bluetooth**.
 - **Litros**: confirmación manual en la webapp (botón "Litros").
 
 ### Webapp (Flask :8765)
-- Dashboard: lecturas en vivo, gauges, gráfico del último trayecto.
-- Historial de viajes con consumo, detalle por viaje, DTCs.
-- Mapa Leaflet con selector de calendario y tracks GPX.
-- Alertas y consejos descartables, mantenimiento, repostajes.
-- API REST completa (`/api/status`, `/api/trips`, `/api/map`, `/api/refuels`...).
+- Dashboard: lecturas en vivo, gauges, gráfico del último trayecto, **frescura del dato**
+  visible (si la última lectura es de hace horas o semanas, lo dice y atenúa el panel).
+- Historial de viajes con **filtro por fecha y paginación de 50**, consumo con su origen
+  declarado (real de surtidor / estimado por MAF / sin datos) y ficha propia por viaje
+  (`/trip/<id>`, con descarga **GPX** y **CSV**).
+- Mapa Leaflet con selector de calendario y tracks GPX (posiciones **decimadas a 2.000**
+  por respuesta; `?tracks=0` y `?limit=N` para pedir menos).
+- Alertas **paginadas y agrupadas** (`X-Total-Count`); 119 avisos idénticos de «trayecto
+  corto» se cuentan como uno.
+- **Consumo** (`/consumo`): serie diaria y mensual de las lecturas CAN del cuadro junto al
+  consumo real de surtidor y los €/100 km.
+- Alertas y consejos descartables, mantenimiento, repostajes, DTCs con sistema (P/C/B/U) y
+  auditoría de quién marcó un código como borrado.
+- API REST (`/api/status`, `/api/trips`, `/api/map`, `/api/refuels`, `/api/consumo`...),
+  `gzip` y `ETag` (304 sin cuerpo) en las respuestas grandes, y `/health` para sondas.
+- **PWA**: `/manifest.webmanifest` y `/sw.js` (cachea páginas y estáticos; **nunca**
+  `/api/`, porque un dato viejo servido como actual es peor que un error visible).
+- **POST con token**: los cinco endpoints que cambian datos exigen la cabecera
+  `X-OBD-Token` con el valor de `webapp.api_token` del config (401 sin él). Sin token
+  configurado no se exige, pero entonces el panel queda abierto a cualquiera con acceso a
+  la red: `/api/dtcs/clear` ya no puede marcar todo el histórico de una vez — exige la
+  lista de códigos concretos y deja `cleared_ts`/`cleared_by`.
 
 ## Portabilidad
 

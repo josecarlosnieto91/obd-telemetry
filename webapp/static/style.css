@@ -257,7 +257,7 @@ a:focus-visible, button:focus-visible, [tabindex="0"]:focus-visible {
     width: 22px; height: 22px;
     border-radius: 50%;
     cursor: pointer;
-    font-size: 0.7em;
+    font-size: var(--fs-min);   /* antes 0.7em → 10,08 px medidos */
     line-height: 1;
     flex-shrink: 0;
     transition: all 0.2s;

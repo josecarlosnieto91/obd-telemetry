@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import gzip
+import hashlib
 from datetime import datetime, timedelta
 from flask import Flask, render_template, jsonify, request, Response
 
@@ -142,7 +143,7 @@ def health():
 
 @app.after_request
 def _comprimir(resp):
-    """gzip en las respuestas grandes.
+    """gzip en las respuestas grandes y ETag para no repetir lo que no cambió.
 
     /api/map devolvía 1 MB por la tailnet sin comprimir (medido 2026-10-28) y
     el mapa se abre desde el móvil. `send_file` (los estáticos) va en modo
@@ -153,18 +154,24 @@ def _comprimir(resp):
     if resp.mimetype not in ("application/json", "text/html", "text/css",
                              "application/javascript", "image/svg+xml"):
         return resp
-    if request.accept_encodings.find("gzip") < 0:
-        return resp
-    if resp.content_length is not None and resp.content_length < 800:
-        return resp
-    datos = resp.get_data()
-    comprimido = gzip.compress(datos, 6)
-    if len(comprimido) >= len(datos):
-        return resp
-    resp.set_data(comprimido)
-    resp.headers["Content-Encoding"] = "gzip"
-    resp.headers["Content-Length"] = str(len(comprimido))
-    resp.headers.add("Vary", "Accept-Encoding")
+    if request.accept_encodings.find("gzip") >= 0 and not (
+            resp.content_length is not None and resp.content_length < 800):
+        datos = resp.get_data()
+        comprimido = gzip.compress(datos, 6)
+        if len(comprimido) < len(datos):
+            resp.set_data(comprimido)
+            resp.headers["Content-Encoding"] = "gzip"
+            resp.headers["Content-Length"] = str(len(comprimido))
+            resp.headers.add("Vary", "Accept-Encoding")
+    # ETag del cuerpo ya servido: el dashboard y las APIs se sondean cada 5 s y
+    # la mayoría de las veces el contenido no ha cambiado (304 = 0 bytes).
+    cuerpo = resp.get_data()
+    if cuerpo:
+        etag = '"' + hashlib.md5(cuerpo).hexdigest() + '"'
+        resp.headers.setdefault("ETag", etag)
+        if request.headers.get("If-None-Match") == resp.headers.get("ETag"):
+            resp.status_code = 304
+            resp.set_data(b"")
     return resp
 
 # ── API Routes ─────────────────────────────────────────────────
@@ -200,6 +207,8 @@ def api_status():
         ORDER BY timestamp DESC LIMIT 10
     """)
     dtcs_active = [dict(r) for r in c.fetchall()]
+    for d in dtcs_active:
+        d["sistema"] = _dtc_sistema(d.get("code"))
     ignored = car_status.ignored_dtcs()
     if ignored:
         dtcs_active = [d for d in dtcs_active if d["code"] not in ignored]
@@ -283,6 +292,16 @@ def api_status():
     else:
         return jsonify({"connected": False, "message": "No hay datos aún", "alert_count": 0,
                         "dtcs": [], "frescura": None, "pids_no_soportados": no_soportados})
+
+
+def _dtc_sistema(code):
+    """Sistema del código según SAE J2012 (primera letra).
+
+    P = motor/transmisión, C = chasis, B = carrocería, U = red. Es información
+    real y no interpretada: el dashboard no debe insinuar gravedad que no sabe.
+    """
+    letra = (str(code or "?")[:1]).upper()
+    return {"P": "Motor", "C": "Chasis", "B": "Carrocería", "U": "Red"}.get(letra, "Desconocido")
 
 
 @app.route("/api/fap")
@@ -531,6 +550,8 @@ def api_dtcs():
         ORDER BY last_seen DESC
     """)
     rows = [dict(r) for r in c.fetchall()]
+    for r in rows:
+        r["sistema"] = _dtc_sistema(r.get("code"))
     conn.close()
     return jsonify(rows)
 
@@ -1094,6 +1115,63 @@ def api_trip_csv(trip_id):
     resp = Response("\n".join(lineas), mimetype="text/csv")
     resp.headers["Content-Disposition"] = f'attachment; filename="viaje-{trip_id}.csv"'
     return resp
+
+
+@app.route("/manifest.webmanifest")
+def manifest():
+    """Manifest de la PWA: la tablet la instala como app en el salpicadero."""
+    datos = {
+        "name": "OBD Telemetry — Polar Star",
+        "short_name": "OBD",
+        "start_url": "/",
+        "display": "standalone",
+        "background_color": "#0d1117",
+        "theme_color": "#0d1117",
+        "lang": "es",
+        "icons": [
+            {"src": "/favicon.ico", "sizes": "any", "type": "image/svg+xml",
+             "purpose": "any"},
+        ],
+    }
+    return jsonify(datos)
+
+
+@app.route("/sw.js")
+def service_worker():
+    """Service worker mínimo: sirve del cache lo ya visto y, si no hay red,
+    devuelve la última copia del dashboard en lugar de la pantalla de error.
+
+    No intercepta las APIs con datos en vivo (`/api/`): un dato viejo servido
+    como actual es peor que un error visible.
+    """
+    js = '''
+const CACHE = 'obd-v1';
+const ESTATICOS = ['/static/style.css', '/static/nav.js', '/static/chart.umd.min.js'];
+self.addEventListener('install', (e) => {
+  e.waitUntil(caches.open(CACHE).then(c => c.addAll(ESTATICOS)).catch(() => {}));
+  self.skipWaiting();
+});
+self.addEventListener('activate', (e) => {
+  e.waitUntil(caches.keys().then(ks => Promise.all(
+    ks.filter(k => k !== CACHE).map(k => caches.delete(k)))));
+  self.clients.claim();
+});
+self.addEventListener('fetch', (e) => {
+  const url = new URL(e.request.url);
+  if (e.request.method !== 'GET' || url.pathname.startsWith('/api/')) return;
+  if (url.pathname.startsWith('/static/')) {
+    e.respondWith(caches.match(e.request).then(r => r || fetch(e.request)));
+    return;
+  }
+  // Páginas: red primero, y si falla, la última copia buena.
+  e.respondWith(fetch(e.request).then(r => {
+    const copia = r.clone();
+    caches.open(CACHE).then(c => c.put(e.request, copia)).catch(() => {});
+    return r;
+  }).catch(() => caches.match(e.request)));
+});
+'''
+    return Response(js, mimetype="application/javascript")
 
 
 @app.route("/consumo")
