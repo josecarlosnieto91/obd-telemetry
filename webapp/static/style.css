@@ -212,8 +212,31 @@ tr:hover { background: var(--card-hover); }
     max-height: 80vh;
     overflow-y: auto;
 }
-.close { float: right; font-size: 1.5em; cursor: pointer; color: var(--text-muted); }
-.close:hover { color: var(--text); }
+.close {
+    float: right;
+    font-size: 1.5em;
+    line-height: 1;
+    cursor: pointer;
+    /* Era un <span>; al convertirlo en <button> heredó el color del control
+       nativo y el contraste cayó a 1,73:1 (medido 2026-10-28). */
+    background: none;
+    border: 0;
+    padding: 0 4px;
+    color: var(--text-muted);
+    font-family: inherit;
+}
+.close:hover, .close:focus-visible { color: var(--text); }
+
+/* Foco visible en TODO lo interactivo (antes solo en inputs): la pantalla del
+   coche se maneja con mando y sin anillo no se sabe dónde está el foco. */
+a:focus-visible, button:focus-visible, [tabindex="0"]:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; animation: none !important; }
+}
 
 /* ── Tips ───────────────────────────────────────────────── */
 .tips-grid {
