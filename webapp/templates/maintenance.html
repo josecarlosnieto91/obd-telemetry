@@ -75,11 +75,7 @@
 // Consejo descartable: marca acknowledged=1 en BD (sigue en el histórico /alerts)
 async function dismissTip(id, li) {
     try {
-        await fetch('/api/alerts/acknowledge', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({id})
-        });
+        await apiPost('/api/alerts/acknowledge', {id});
         li.style.opacity = '0.3';
         li.style.textDecoration = 'line-through';
         li.querySelector('.tip-dismiss').style.display = 'none';
@@ -235,11 +231,7 @@ async function registerService(id, btn) {
     const km = parseFloat(String(v).replace(',', '.'));
     if (!isNaN(km) && km > 0) body.odometer_km = km;
     try {
-        const r = await fetch('/api/services', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(body)
-        });
+        const r = await apiPost('/api/services', body);
         const d = await r.json();
         if (d.ok) {
             btn.textContent = '✓';

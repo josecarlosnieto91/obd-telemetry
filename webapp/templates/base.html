@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#111111">
+    {% if api_token %}<meta name="api-token" content="{{ api_token }}">{% endif %}
     <title>{% block title %}OBD Telemetry{% endblock %}</title>
     <link rel="icon" href="/favicon.ico" type="image/svg+xml">
     <link rel="stylesheet" href="/static/style.css?v={{ static_v }}">
@@ -26,6 +27,7 @@
             <a href="/dtcs" {% if 'dtcs' in request.path %}class="active"{% endif %}>DTCs</a>
             <a href="/map" {% if 'map' in request.path %}class="active"{% endif %}>Mapa</a>
             <a href="/refuels" {% if 'refuels' in request.path %}class="active"{% endif %}>Repostajes</a>
+            <a href="/consumo" {% if 'consumo' in request.path %}class="active"{% endif %}>Consumo</a>
             <a href="/maintenance" {% if 'maintenance' in request.path %}class="active"{% endif %}>Consejos</a>
         </div>
         <div class="nav-status" id="nav-status" role="status" aria-live="polite">● Desconectado</div>
@@ -34,20 +36,35 @@
         {% block content %}{% endblock %}
     </main>
     <script>
+        // POST con token: los endpoints que cambian datos del coche (marcar
+        // DTCs, reconocer alertas, litros, servicios) exigen la cabecera
+        // X-OBD-Token. El valor viene del config (webapp.api_token) por meta.
+        window.apiPost = function (url, cuerpo) {
+            const meta = document.querySelector('meta[name="api-token"]');
+            const headers = { 'Content-Type': 'application/json' };
+            if (meta) headers['X-OBD-Token'] = meta.content;
+            return fetch(url, { method: 'POST', headers: headers, body: JSON.stringify(cuerpo || {}) });
+        };
+
         // Menú hamburguesa (móvil)
         document.getElementById('nav-toggle').addEventListener('click', () => {
             document.getElementById('nav-links').classList.toggle('open');
         });
 
-        // Connection status indicator in nav
+        // Connection status indicator in nav — con la FRESCURA del dato: sin
+        // esto el panel pinta valores de hace semanas igual que los de ahora.
         setInterval(async () => {
             try {
                 const r = await fetch('/api/status');
                 const d = await r.json();
                 const el = document.getElementById('nav-status');
                 if (d.connected) {
-                    el.textContent = `● ${d.speed || 0} km/h`;
-                    el.className = 'nav-status online';
+                    const fresco = d.frescura || {};
+                    const viejo = fresco.estado === 'viejo' || fresco.estado === 'obsoleto';
+                    const marca = viejo ? '⚠️' : '●';
+                    el.textContent = `${marca} ${d.speed || 0} km/h${fresco.etiqueta ? ' · ' + fresco.etiqueta : ''}`;
+                    el.className = 'nav-status ' + (viejo ? 'stale' : 'online');
+                    el.title = 'Última lectura: ' + (fresco.ts || '—');
                 } else {
                     el.textContent = '● Sin datos';
                     el.className = 'nav-status';

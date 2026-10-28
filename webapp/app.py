@@ -30,8 +30,62 @@ def _static_version():
                 if os.path.exists(os.path.join(carpeta, f)))
     except (OSError, ValueError):
         v = 0
-    return {"static_v": v}
+    return {"static_v": v, "api_token": _api_token()}
 DB_PATH = os.path.expanduser("~/.hermes/data/obd_telemetry.db")
+CONFIG_PATH = os.path.expanduser("~/.hermes/scripts/obd_vehicle_config.json")
+
+
+def _config():
+    """Config del vehículo (la operativa, no la copia del repo)."""
+    try:
+        with open(CONFIG_PATH) as fh:
+            return json.load(fh)
+    except Exception:
+        return {}
+
+
+def _api_token():
+    """Token exigido a los POST (`webapp.api_token`). Vacío = sin exigencia."""
+    return ((_config().get("webapp") or {}).get("api_token") or "").strip()
+
+
+def _autorizado():
+    """True si el POST puede ejecutarse.
+
+    Los POST cambian datos del coche (marcar DTCs, reconocer alertas, apuntar
+    litros) y la app escucha en la tailnet sin más protección: un token
+    compartido en cabecera es el mínimo que evita que cualquier dispositivo de
+    la red marque como borrado un fallo real. Sin token configurado no se exige
+    (compatibilidad), pero se avisa una vez en el log.
+    """
+    esperado = _api_token()
+    if not esperado:
+        return True
+    recibido = request.headers.get("X-OBD-Token", "")
+    return recibido == esperado
+
+
+def _ensure_auditoria_dtc():
+    """Columnas de auditoría en `dtc`: quién y cuándo marcó un código como borrado.
+
+    Sin esto no hay forma de saber por qué P0113 apareció marcado `cleared=1`
+    el 2026-10-28 ni de distinguir "lo borró el usuario" de "lo ocultó una
+    herramienta". Idempotente y aditivo.
+    """
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=10.0)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(dtc)")}
+        for col, tipo in (("cleared_ts", "TEXT"), ("cleared_by", "TEXT")):
+            if col not in cols:
+                conn.execute(f"ALTER TABLE dtc ADD COLUMN {col} {tipo}")
+        conn.commit()
+        conn.close()
+    except sqlite3.Error as e:
+        sys.stderr.write(f"[webapp] auditoría dtc: {e}\n")
+
+
+_ensure_auditoria_dtc()
+
 
 # car_status.py vive en ../collector (una sola copia en el repo). Antes apuntaba
 # a ~/.hermes/scripts, donde solo queda el wrapper .sh del cron → el servicio
@@ -117,7 +171,13 @@ def _comprimir(resp):
 
 @app.route("/api/status")
 def api_status():
-    """Current vehicle status"""
+    """Current vehicle status
+
+    Incluye `frescura` (cuánto hace de la última lectura, con su estado) y
+    `pids_no_soportados`: antes el dashboard pintaba valores de hace semanas
+    como si fueran de ahora y devolvía `null` para PIDs que este coche no
+    expone nunca, indistinguible de un fallo de lectura.
+    """
     conn = get_db()
     c = conn.cursor()
 
@@ -164,10 +224,36 @@ def api_status():
             import sys
             print(f"[webapp] fuel_remaining error: {e}", file=sys.stderr)
 
+    # Frescura del dato: sin esto el dashboard pinta valores de hace semanas
+    # con el mismo aspecto que los de ahora mismo.
+    frescura = None
+    if latest:
+        try:
+            t = datetime.fromisoformat(str(latest["timestamp"]))
+            minutos = (datetime.now() - t).total_seconds() / 60.0
+            if minutos < 5:
+                estado, etiqueta = "fresco", "ahora mismo"
+            elif minutos < 60:
+                estado, etiqueta = "fresco", f"hace {minutos:.0f} min"
+            elif minutos < 1440:
+                estado, etiqueta = "reciente", f"hace {minutos/60:.0f} h"
+            elif minutos < 1440 * 7:
+                estado, etiqueta = "viejo", f"hace {minutos/1440:.0f} días"
+            else:
+                estado, etiqueta = "obsoleto", f"hace {minutos/1440:.0f} días"
+            frescura = {"minutos": round(minutos, 1), "estado": estado,
+                        "etiqueta": etiqueta, "ts": latest["timestamp"]}
+        except Exception:
+            frescura = {"minutos": None, "estado": "desconocido", "etiqueta": "sin fecha", "ts": None}
+
+    cfg = _config()
+    vcfg = cfg.get("vehicle", {}) or {}
+    no_soportados = list(vcfg.get("unsupported_pids") or [])
+
     conn.close()
 
     if latest:
-        return jsonify({
+        datos = {
             "connected": True,
             "timestamp": latest["timestamp"],
             "rpm": latest["rpm"],
@@ -188,9 +274,15 @@ def api_status():
             "session_active": session is not None,
             "alert_count": alert_count,
             "dtcs": dtcs_active,
-        })
+            "frescura": frescura,
+            # PIDs que ESTE coche no expone: el cliente no debe pintarlos como
+            # «—» (que se confunde con un fallo de lectura).
+            "pids_no_soportados": no_soportados,
+        }
+        return jsonify(datos)
     else:
-        return jsonify({"connected": False, "message": "No hay datos aún", "alert_count": 0, "dtcs": []})
+        return jsonify({"connected": False, "message": "No hay datos aún", "alert_count": 0,
+                        "dtcs": [], "frescura": None, "pids_no_soportados": no_soportados})
 
 
 @app.route("/api/fap")
@@ -215,25 +307,54 @@ def api_calibration():
     return jsonify(cal)
 
 
+def _maf_factor():
+    """Factor de corrección del consumo estimado por MAF (mismo criterio que
+    `trip_summary._maf_factor`: medido ×1,92 contra el surtidor el 2026-10-28)."""
+    try:
+        return float((_config().get("vehicle") or {}).get("maf_consumption_factor", 1.0))
+    except Exception:
+        return 1.0
+
+
 @app.route("/api/trips")
 def api_trips():
-    """Trip history + consumo estimado (MAF)."""
+    """Trip history + consumo (REAL de surtidor / estimado por MAF / sin datos).
+
+    Cada viaje lleva `consumo_origen` para que la interfaz pueda decir de dónde
+    sale la cifra: antes se mezclaban en el mismo campo el real, el del cuadro y
+    la estimación MAF sin decirlo.
+    """
     conn = get_db()
     c = conn.cursor()
+    desde = request.args.get("from")
+    hasta = request.args.get("to")
+    limit = min(request.args.get("limit", 50, type=int) or 50, 500)
+    offset = max(request.args.get("offset", 0, type=int) or 0, 0)
     # La webapp y el colector van por separado: si la BD aún no tiene
     # real_l100 (migración del colector pendiente), no se puede tumbar la
     # página entera — se degrada a NULL y se usa la estimación con MAF.
     cols = {r[1] for r in c.execute("PRAGMA table_info(sessions)")}
     real_col = "real_l100" if "real_l100" in cols else "NULL AS real_l100"
+    filtros, params = [], []
+    if desde:
+        filtros.append("start_time >= ?")
+        params.append(desde)
+    if hasta:
+        filtros.append("start_time <= ?")
+        params.append(hasta + "T23:59:59")
+    where = ("WHERE " + " AND ".join(filtros) + " ") if filtros else ""
+    c.execute(f"SELECT COUNT(*) FROM sessions {where}", tuple(params))
+    total = c.fetchone()[0]
     c.execute(f"""
         SELECT id, start_time, end_time, distance_km, max_speed, avg_speed,
                max_rpm, driving_minutes, status, consumption_l100, {real_col}
-        FROM sessions ORDER BY start_time DESC LIMIT 50
-    """)
+        FROM sessions {where} ORDER BY start_time DESC LIMIT ? OFFSET ?
+    """, tuple(params) + (limit, offset))
     trips = [dict(row) for row in c.fetchall()]
     # Una sola consulta para todos los viajes sin consumo real (antes: un
     # SELECT por viaje, hasta 50 seguidos). El consumo estimado por MAF se
     # calcula solo para los que no tienen real_l100.
+    factor = _maf_factor()
     sin_real = [t["id"] for t in trips if t.get("real_l100") is None]
     estimado = {sid: [] for sid in sin_real}
     if sin_real:
@@ -244,22 +365,28 @@ def api_trips():
             sin_real,
         )
         for r in c.fetchall():
-            l100 = (r["maf"] / 740.0) * 3600.0 / r["speed"] * 100.0
+            l100 = (r["maf"] / 740.0) * 3600.0 / r["speed"] * 100.0 * factor
             if 0 < l100 < 60:
                 estimado[r["session_id"]].append(l100)
     for t in trips:
-        # El consumo que se enseña es el REAL (depósito a depósito, calibrado
-        # contra el surtidor). El del cuadro (consumption_l100) marca ~la mitad
-        # y se conserva en la fila, pero no se usa para la cifra visible.
         t["consumo_cuadro_l100"] = t.get("consumption_l100")
         if t.get("real_l100") is not None:
+            # El consumo que vale: real, depósito a depósito, contra el surtidor.
             t["consumo_l100"] = t["real_l100"]
+            t["consumo_origen"] = "real"
             continue
-        # Viajes anteriores a la columna real_l100: estimación con MAF
         inst = estimado.get(t["id"]) or []
-        t["consumo_l100"] = round(sum(inst) / len(inst), 1) if inst else None
+        if inst:
+            t["consumo_l100"] = round(sum(inst) / len(inst), 1)
+            t["consumo_origen"] = "estimado_maf"
+        else:
+            # Ni real ni estimación: se dice, no se inventa una cifra.
+            t["consumo_l100"] = None
+            t["consumo_origen"] = None
     conn.close()
-    return jsonify(trips)
+    resp = jsonify(trips)
+    resp.headers["X-Total-Count"] = str(total)
+    return resp
 
 
 @app.route("/api/trip/<int:trip_id>")
@@ -300,31 +427,50 @@ def api_trip_detail(trip_id):
 
 @app.route("/api/alerts")
 def api_alerts():
-    """All alerts"""
+    """All alerts
+
+    Se devuelven como mucho 100 (respuesta pequeña para el móvil) y el TOTAL va
+    en la cabecera `X-Total-Count`: antes la página decía «195 alertas» y
+    enseñaba 100 sin avisar de que faltaban 95.
+    """
+    severity = request.args.get("severity")
+    limit = min(request.args.get("limit", 100, type=int) or 100, 500)
+    offset = max(request.args.get("offset", 0, type=int) or 0, 0)
     conn = get_db()
     c = conn.cursor()
-    severity = request.args.get("severity")
     if severity:
+        c.execute("SELECT COUNT(*) FROM alerts WHERE severity = ?", (severity,))
+        total = c.fetchone()[0]
         c.execute("""
             SELECT a.*, s.start_time as trip_start
             FROM alerts a LEFT JOIN sessions s ON a.session_id = s.id
-            WHERE a.severity = ? ORDER BY a.timestamp DESC LIMIT 100
-        """, (severity,))
+            WHERE a.severity = ? ORDER BY a.timestamp DESC LIMIT ? OFFSET ?
+        """, (severity, limit, offset))
     else:
+        c.execute("SELECT COUNT(*) FROM alerts")
+        total = c.fetchone()[0]
         c.execute("""
             SELECT a.*, s.start_time as trip_start
             FROM alerts a LEFT JOIN sessions s ON a.session_id = s.id
-            ORDER BY a.timestamp DESC LIMIT 100
-        """)
+            ORDER BY a.timestamp DESC LIMIT ? OFFSET ?
+        """, (limit, offset))
     alerts = [dict(row) for row in c.fetchall()]
     conn.close()
-    return jsonify(alerts)
+    resp = jsonify(alerts)
+    resp.headers["X-Total-Count"] = str(total)
+    resp.headers["X-Limit"] = str(limit)
+    resp.headers["X-Offset"] = str(offset)
+    return resp
 
 
 @app.route("/api/alerts/acknowledge", methods=["POST"])
 def api_acknowledge():
-    data = request.get_json()
+    if not _autorizado():
+        return jsonify({"error": "token requerido (cabecera X-OBD-Token)"}), 401
+    data = request.get_json(silent=True) or {}
     alert_id = data.get("id")
+    if alert_id is None:
+        return jsonify({"error": "id required"}), 400
     conn = get_db()
     conn.execute("UPDATE alerts SET acknowledged = 1 WHERE id = ?", (alert_id,))
     conn.commit()
@@ -336,31 +482,50 @@ def api_acknowledge():
 def api_dtcs_clear():
     """Marca los DTCs como borrados (cleared=1) para que no aparezcan como
     activos. No los elimina: quedan en el histórico. Útil para verificar que
-    un mantenimiento resolvió el fallo (si el código reaparece, sigue ahí)."""
-    data = request.get_json() or {}
-    codes = data.get("codes")  # lista de códigos; si es None, borra todos
+    un mantenimiento resolvió el fallo (si el código reaparece, sigue ahí).
+
+    EXIGE la lista de códigos: antes, sin cuerpo, marcaba como borrado el
+    histórico ENTERO (`UPDATE dtc SET cleared=1`), y el dashboard tenía un botón
+    que lo hacía con una confirmación. Así se ocultó P0113 el 2026-10-28.
+    """
+    if not _autorizado():
+        return jsonify({"error": "token requerido (cabecera X-OBD-Token)"}), 401
+    data = request.get_json(silent=True) or {}
+    codes = data.get("codes")
+    if not isinstance(codes, list) or not codes:
+        return jsonify({
+            "error": "codes requerido: lista no vacía de códigos concretos",
+            "ejemplo": {"codes": ["P0113"]},
+        }), 400
+    motivo = (data.get("motivo") or "panel")[:200]
+    ahora = datetime.now().isoformat(timespec="seconds")
     conn = get_db()
-    if codes:
-        for code in codes:
-            conn.execute("UPDATE dtc SET cleared=1 WHERE code=?", (code,))
-    else:
-        conn.execute("UPDATE dtc SET cleared=1")
+    marcados = {}
+    for code in codes:
+        cur = conn.execute(
+            "UPDATE dtc SET cleared=1, cleared_ts=?, cleared_by=? "
+            "WHERE code=? AND (cleared IS NULL OR cleared=0)",
+            (ahora, motivo, str(code)),
+        )
+        marcados[str(code)] = cur.rowcount
     conn.commit()
     conn.close()
-    return jsonify({"success": True, "cleared": codes or "all"})
+    return jsonify({"success": True, "cleared": marcados, "ts": ahora, "motivo": motivo})
 
 
 @app.route("/api/dtcs")
 def api_dtcs():
     """Histórico completo de DTCs: código, descripción, estado (activo/borrado),
-    primera/última vez visto y viajes asociados."""
+    primera/última vez visto, viajes asociados y quién lo marcó como borrado."""
     conn = get_db()
     c = conn.cursor()
-    c.execute("""
-        SELECT code, description, cleared,
+    cols = {r[1] for r in c.execute("PRAGMA table_info(dtc)")}
+    audit = ", MAX(cleared_ts) AS cleared_ts, MAX(cleared_by) AS cleared_by" if "cleared_ts" in cols else ""
+    c.execute(f"""
+        SELECT code, description, MAX(cleared) AS cleared,
                MIN(timestamp) AS first_seen, MAX(timestamp) AS last_seen,
                COUNT(*) AS sightings,
-               GROUP_CONCAT(DISTINCT session_id) AS session_ids
+               GROUP_CONCAT(DISTINCT session_id) AS session_ids {audit}
         FROM dtc
         GROUP BY code
         ORDER BY last_seen DESC
@@ -518,6 +683,8 @@ def api_refuels():
 def api_refuel_liters(rid):
     """Confirma litros de un repostaje detectado por GPS. Recalcula coste con
     el precio de la estación ya guardado (precio del día de la detección)."""
+    if not _autorizado():
+        return jsonify({"error": "token requerido (cabecera X-OBD-Token)"}), 401
     data = request.get_json(silent=True) or {}
     litros = data.get("liters")
     if not litros or litros <= 0:
@@ -553,6 +720,8 @@ def api_refuel_manual():
     - price_per_l: opcional (€/L); si no, cost queda null
     - cost: se calcula si hay price_per_l
     """
+    if not _autorizado():
+        return jsonify({"error": "token requerido (cabecera X-OBD-Token)"}), 401
     data = request.get_json(silent=True) or {}
     litros = data.get("liters")
     if not litros or litros <= 0:
@@ -603,6 +772,8 @@ def api_add_service():
     Si no se pasa odometer_km, usa el odómetro actual. El campo permite
     anclar servicios hechos en el pasado (p.ej. aceite cambiado hace 5.000 km)
     para que el contador de intervalos sea real desde el km correcto."""
+    if not _autorizado():
+        return jsonify({"error": "token requerido (cabecera X-OBD-Token)"}), 401
     data = request.get_json(silent=True) or {}
     mid = data.get("maintenance_id")
     if not mid:
@@ -664,6 +835,9 @@ def parse_gpx(path):
 # Sin esto cada visita al mapa releía y parseaba los 180 GPX (1,9 MB) aunque el
 # cliente solo pidiera un viaje; medido 2026-10-28: 69 ms y creciendo.
 _gpx_cache = {}
+
+# Tope de posiciones que se devuelven al mapa sin filtro (el resto se decima).
+MAX_POSICIONES_MAPA = 2000
 
 
 def parse_gpx_cached(path):
@@ -731,6 +905,19 @@ def api_map():
         positions.reverse()   # devolver siempre en orden temporal
     conn.close()
 
+    # Decimación: sin filtro salían 7.677 posiciones (819 KB comprimidos a 180).
+    # Para pintar un trazado no hacen falta todas; se conservan primero y último
+    # de cada tramo para que el recorrido no cambie de forma.
+    total_pos = len(positions)
+    decimado = False
+    if not limit and total_pos > MAX_POSICIONES_MAPA:
+        paso = total_pos / float(MAX_POSICIONES_MAPA)
+        muestra = [positions[int(i * paso)] for i in range(MAX_POSICIONES_MAPA)]
+        if positions[-1] not in muestra:
+            muestra.append(positions[-1])
+        positions = muestra
+        decimado = True
+
     tracks = []
     tracks_dir = os.path.expanduser("~/.hermes/data/tracks")
     if con_tracks and os.path.isdir(tracks_dir):
@@ -740,7 +927,184 @@ def api_map():
                 if pts:
                     tracks.append({"name": f, "points": pts})
 
-    return jsonify({"positions": positions, "tracks": tracks})
+    resp = jsonify({"positions": positions, "tracks": tracks,
+                    "total_positions": total_pos, "decimado": decimado})
+    return resp
+
+
+# ── Consumo (datos CAN que estaban enterrados) ────────────────
+
+@app.route("/api/consumo")
+def api_consumo():
+    """Consumo por mes y por día, con las tres fuentes separadas y etiquetadas.
+
+    Fuentes:
+      · `can_readings.consumption_l100` — lo que marca el cuadro por CAN (~86.700
+        lecturas cada ~30 s desde el 23/08, guardadas y sin usar en la web).
+      · `sessions.real_l100` — consumo real depósito a depósito (contra surtidor).
+      · `refuels` — litros y coste para calcular €/100 km reales.
+
+    `?dias=N` (por defecto 90) acota la serie diaria.
+    """
+    dias = min(request.args.get("dias", 90, type=int) or 90, 730)
+    conn = get_db()
+    c = conn.cursor()
+
+    mensual = []
+    try:
+        c.execute("""
+            SELECT substr(ts,1,7) AS mes,
+                   COUNT(*) AS muestras,
+                   AVG(consumption_l100) AS cuadro_medio,
+                   MIN(consumption_l100) AS cuadro_min,
+                   MAX(consumption_l100) AS cuadro_max,
+                   AVG(range_km) AS rango_medio
+            FROM can_readings
+            WHERE consumption_l100 IS NOT NULL AND consumption_l100 > 0
+            GROUP BY mes ORDER BY mes
+        """)
+        mensual = [dict(r) for r in c.fetchall()]
+    except sqlite3.OperationalError as e:
+        sys.stderr.write(f"[webapp] consumo CAN: {e}\n")
+
+    real_mes = {}
+    c.execute("""
+        SELECT substr(start_time,1,7) AS mes, COUNT(*) AS viajes,
+               AVG(real_l100) AS real_medio, SUM(distance_km) AS km
+        FROM sessions WHERE real_l100 IS NOT NULL GROUP BY mes
+    """)
+    for r in c.fetchall():
+        real_mes[r["mes"]] = dict(r)
+
+    coste_mes = {}
+    c.execute("""
+        SELECT substr(ts,1,7) AS mes, SUM(liters) AS litros, SUM(cost) AS coste,
+               AVG(price_per_l) AS precio_medio
+        FROM refuels WHERE liters IS NOT NULL GROUP BY mes
+    """)
+    for r in c.fetchall():
+        coste_mes[r["mes"]] = dict(r)
+
+    for m in mensual:
+        real = real_mes.get(m["mes"], {})
+        coste = coste_mes.get(m["mes"], {})
+        m["real_medio"] = round(real["real_medio"], 2) if real.get("real_medio") else None
+        m["viajes_con_real"] = real.get("viajes")
+        m["km"] = round(real["km"], 1) if real.get("km") else None
+        m["litros"] = round(coste["litros"], 2) if coste.get("litros") else None
+        m["coste_eur"] = round(coste["coste"], 2) if coste.get("coste") else None
+        m["precio_medio_l"] = round(coste["precio_medio"], 3) if coste.get("precio_medio") else None
+        if m.get("cuadro_medio") is not None:
+            m["cuadro_medio"] = round(m["cuadro_medio"], 2)
+        # €/100 km real: con precio medio del mes y consumo real
+        real_medio = m.get("real_medio")
+        precio_medio = m.get("precio_medio_l")
+        m["eur_100km"] = round(real_medio * precio_medio, 2) if real_medio and precio_medio else None
+
+    desde = (datetime.now() - timedelta(days=dias)).strftime("%Y-%m-%d")
+    serie = []
+    try:
+        c.execute("""
+            SELECT substr(ts,1,10) AS dia, AVG(consumption_l100) AS cuadro,
+                   AVG(range_km) AS rango, COUNT(*) AS n
+            FROM can_readings
+            WHERE ts >= ? AND consumption_l100 IS NOT NULL AND consumption_l100 > 0
+            GROUP BY dia ORDER BY dia
+        """, (desde,))
+        serie = [{"dia": r["dia"], "cuadro": round(r["cuadro"], 2),
+                  "rango": round(r["rango"], 1) if r["rango"] else None,
+                  "muestras": r["n"]} for r in c.fetchall()]
+    except sqlite3.OperationalError:
+        pass
+
+    # Aviso honesto: el odómetro del CAN no es de fiar (ver auditoría). No basta
+    # con mirar la variación de todo el histórico (arrancó en 105 y saltó a
+    # 6.553): lo que delata el fallo es que lleve semanas CONGELADO.
+    aviso = None
+    try:
+        desde30 = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+        c.execute("SELECT MAX(odometer_km) - MIN(odometer_km) AS var, COUNT(*) AS n "
+                  "FROM can_readings WHERE odometer_km IS NOT NULL AND ts >= ?",
+                  (desde30,))
+        r = c.fetchone()
+        if r and r["n"] and r["n"] > 100 and (r["var"] is None or r["var"] < 1):
+            aviso = ("El odómetro que publica el CAN no se ha movido en los últimos 30 días "
+                     f"({r['n']} lecturas): no se usa para calcular nada.")
+    except sqlite3.OperationalError:
+        pass
+
+    conn.close()
+    return jsonify({"mensual": mensual, "serie_diaria": serie, "dias": dias, "aviso": aviso})
+
+
+# ── Descargas por viaje ───────────────────────────────────────
+
+@app.route("/api/trip/<int:trip_id>/gpx")
+def api_trip_gpx(trip_id):
+    """GPX del trazado de un viaje (los ficheros existen en disco, pero la web
+    no los ofrecía como descarga)."""
+    conn = get_db()
+    c = conn.cursor()
+    fila = c.execute("SELECT start_time, end_time FROM sessions WHERE id=?",
+                     (trip_id,)).fetchone()
+    if fila is None:
+        conn.close()
+        return jsonify({"error": "trip not found", "id": trip_id}), 404
+    puntos = c.execute(
+        "SELECT timestamp, lat, lon FROM positions WHERE session_id=? "
+        "AND lat IS NOT NULL AND lon IS NOT NULL ORDER BY id", (trip_id,)).fetchall()
+    conn.close()
+    if not puntos:
+        return jsonify({"error": "trip sin posiciones GPS", "id": trip_id}), 404
+
+    lineas = ['<?xml version="1.0" encoding="UTF-8"?>',
+              '<gpx version="1.1" creator="obd-telemetry" '
+              'xmlns="http://www.topografix.com/GPX/1/1">',
+              f'  <trk><name>Viaje {trip_id} — {fila["start_time"]}</name><trkseg>']
+    for p in puntos:
+        lineas.append(f'    <trkpt lat="{p["lat"]}" lon="{p["lon"]}">'
+                      f'<time>{p["timestamp"]}</time></trkpt>')
+    lineas += ['  </trkseg></trk>', '</gpx>']
+    cuerpo = "\n".join(lineas)
+    resp = Response(cuerpo, mimetype="application/gpx+xml")
+    resp.headers["Content-Disposition"] = f'attachment; filename="viaje-{trip_id}.gpx"'
+    return resp
+
+
+@app.route("/api/trip/<int:trip_id>/csv")
+def api_trip_csv(trip_id):
+    """CSV de las lecturas OBD de un viaje (para hoja de cálculo)."""
+    conn = get_db()
+    c = conn.cursor()
+    if c.execute("SELECT 1 FROM sessions WHERE id=?", (trip_id,)).fetchone() is None:
+        conn.close()
+        return jsonify({"error": "trip not found", "id": trip_id}), 404
+    filas = c.execute(
+        "SELECT timestamp, rpm, speed, coolant_temp, engine_load, intake_temp, "
+        "maf, map, voltage FROM readings WHERE session_id=? ORDER BY timestamp",
+        (trip_id,)).fetchall()
+    conn.close()
+    if not filas:
+        return jsonify({"error": "trip sin lecturas", "id": trip_id}), 404
+    cabecera = ["timestamp", "rpm", "speed", "coolant_temp", "engine_load",
+                "intake_temp", "maf", "map", "voltage"]
+    lineas = [",".join(cabecera)]
+    for f in filas:
+        lineas.append(",".join("" if f[k] is None else str(f[k]) for k in cabecera))
+    resp = Response("\n".join(lineas), mimetype="text/csv")
+    resp.headers["Content-Disposition"] = f'attachment; filename="viaje-{trip_id}.csv"'
+    return resp
+
+
+@app.route("/consumo")
+def consumo_view():
+    return render_template("consumo.html")
+
+
+@app.route("/trip/<int:trip_id>")
+def trip_view(trip_id):
+    """Detalle de un viaje con URL propia (además de /trips?trip=<id>)."""
+    return render_template("trip.html", trip_id=trip_id)
 
 
 if __name__ == "__main__":

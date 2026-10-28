@@ -360,6 +360,23 @@ a:focus-visible, button:focus-visible, [tabindex="0"]:focus-visible {
     .hide-mobile { display: none; }
 }
 
+/* ── Frescura del dato ──────────────────────────────────────
+   El panel pintaba valores de hace semanas igual que los de ahora. */
+.frescura { color: var(--text-muted); font-size: max(0.85em, 12px); margin-bottom: 16px; }
+.frescura.stale { color: var(--warn); }
+.datos-viejos .stat-card { opacity: 0.55; }
+.nav-status.stale { color: var(--warn); background: rgba(255,170,0,0.12); }
+
+/* ── Escala tipográfica: nada por debajo de 12px ────────────
+   Medido el 2026-10-28 en navegador: /maintenance llegaba a 10,08px y
+   /refuels a 9,18px (los `em` se encadenaban: th 0,75em dentro de una tabla
+   0,85em). En la pantalla del coche eso no se lee sin acercarse. */
+:root { --fs-min: 12px; }
+th, td, small, .stat-label, .stat-unit, .ms-label, .maint-last, .maint-pct,
+.alert-time, .alert-severity, .alert-category, .muted, .subtitle {
+    font-size: max(0.75em, var(--fs-min));
+}
+
 /* ── Controles de formulario ────────────────────────────────
    No había NINGUNA regla para input/select: se veían los nativos (fondo
    blanco, borde gris claro) sobre el tema oscuro. */

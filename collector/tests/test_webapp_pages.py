@@ -23,7 +23,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(os.path.dirname(HERE))
 WEBAPP = os.path.join(REPO_ROOT, "webapp")
 
-RUTAS = ["/", "/trips", "/alerts", "/dtcs", "/maintenance", "/refuels", "/map"]
+RUTAS = ["/", "/trips", "/alerts", "/dtcs", "/maintenance", "/refuels", "/map",
+         "/consumo", "/trip/1"]
 
 
 @pytest.fixture(scope="module")
@@ -91,8 +92,11 @@ def test_confirmar_litros_conserva_los_decimales_del_surtidor(client, tmp_path,
     con.commit()
     con.close()
     monkeypatch.setattr(mod, "DB_PATH", str(db))
+    # Los POST exigen token (webapp.api_token): en el test se fija uno conocido.
+    monkeypatch.setattr(mod, "_api_token", lambda: "token-de-prueba")
 
-    r = client.post("/api/refuels/112/liters", json={"liters": 49.16})
+    r = client.post("/api/refuels/112/liters", json={"liters": 49.16},
+                    headers={"X-OBD-Token": "token-de-prueba"})
     assert r.status_code == 200, r.get_data(as_text=True)
     assert r.get_json() == {"ok": True, "liters": 49.16, "cost": 89.82,
                             "price_per_l": 1.827}

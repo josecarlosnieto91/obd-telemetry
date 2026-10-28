@@ -47,11 +47,7 @@ async function loadDtcs() {
 
 async function clearDtc(code, btn) {
     if (!confirm(`¿Marcar ${code} como borrado? No se elimina del histórico — sirve para verificar tras el mantenimiento.`)) return;
-    const r = await fetch('/api/dtcs/clear', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({codes: [code]})
-    });
+    const r = await apiPost('/api/dtcs/clear', {codes: [code], motivo: 'panel /dtcs'});
     const j = await r.json();
     if (j.success) {
         loadDtcs();

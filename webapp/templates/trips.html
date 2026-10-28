@@ -43,7 +43,7 @@ async function loadTrips() {
     // .table-wrap mantiene el scroll horizontal DENTRO de la tarjeta (si no, el
     // navegador móvil ensancha la página entera y todo se ve diminuto).
     // Vel. med y RPM max se ocultan en móvil: siguen en el detalle del viaje.
-    let html = '<div class="table-wrap"><table><thead><tr><th>Inicio</th><th>Duración</th><th>Distancia</th><th>Vel. max</th><th class="hide-mobile">Vel. med</th><th class="hide-mobile">RPM max</th><th>Estado</th><th>Mapa</th></tr></thead><tbody>';
+    let html = '<div class="table-wrap"><table><thead><tr><th>Inicio</th><th>Duración</th><th>Distancia</th><th>Vel. max</th><th class="hide-mobile">Vel. med</th><th class="hide-mobile">RPM max</th><th>Consumo</th><th>Estado</th><th>Mapa</th></tr></thead><tbody>';
     for (const t of trips) {
         const start = fmtDate(t.start_time);
         const dur = t.driving_minutes ? `${t.driving_minutes} min` : '—';
@@ -51,14 +51,24 @@ async function loadTrips() {
         const maxSpd = t.max_speed ? `${t.max_speed.toFixed(0)} km/h` : '—';
         const avgSpd = t.avg_speed ? `${t.avg_speed.toFixed(0)} km/h` : '—';
         const maxRpm = t.max_rpm ? `${t.max_rpm.toFixed(0)} rpm` : '—';
+        // El origen de la cifra va en el título: real de surtidor, estimación
+        // MAF o nada. Antes se mezclaban sin decirlo.
+        let cons = '—', consTitle = 'sin datos';
+        if (t.consumo_l100 !== null && t.consumo_l100 !== undefined) {
+            cons = t.consumo_l100.toFixed(1);
+            consTitle = t.consumo_origen === 'real' ? 'real (surtidor)' : 'estimado (MAF)';
+            if (t.consumo_origen !== 'real') cons += ' <span class="muted" style="font-size:11px;">est.</span>';
+        }
         const status = t.status === 'active'
             ? '🟢<span class="hide-mobile"> Activo</span>'
             : '✅<span class="hide-mobile"> Completado</span>';
         html += `<tr onclick="showTrip(${t.id})" style="cursor:pointer">
             <td>${start}</td><td>${dur}</td><td>${dist}</td>
             <td>${maxSpd}</td><td class="hide-mobile">${avgSpd}</td><td class="hide-mobile">${maxRpm}</td>
+            <td title="${consTitle}">${cons}</td>
             <td>${status}</td>
-            <td><a href="/map?session_id=${t.id}" onclick="event.stopPropagation()" title="Ver trazado en el mapa">🗺️</a></td>
+            <td><a href="/trip/${t.id}" onclick="event.stopPropagation()" title="Ficha del viaje">🔗</a>
+                <a href="/map?session_id=${t.id}" onclick="event.stopPropagation()" title="Ver trazado en el mapa">🗺️</a></td>
         </tr>`;
     }
     html += '</tbody></table></div>';

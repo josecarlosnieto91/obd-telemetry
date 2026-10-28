@@ -95,11 +95,7 @@ async function setLiters(id, btn) {
     if (isNaN(litros) || litros <= 0) { alert('Número inválido'); return; }
     btn.disabled = true;
     try {
-        const r = await fetch(`/api/refuels/${id}/liters`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({liters: litros})
-        });
+        const r = await apiPost(`/api/refuels/${id}/liters`, {liters: litros});
         const d = await r.json();
         if (d.ok) { loadRefuels(); }
         else { btn.disabled = false; alert('Error: ' + (d.error || 'desconocido')); }
@@ -118,16 +114,12 @@ async function submitManual(ev) {
     const full = document.getElementById('m-full').checked;
     msg.innerHTML = '<span class="muted">Guardando…</span>';
     try {
-        const r = await fetch('/api/refuels/manual', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-                liters: litros,
-                price_per_l: precio,
-                station: estacion || null,
-                ts: fechaRaw ? new Date(fechaRaw).toISOString() : null,
-                full_tank: full
-            })
+        const r = await apiPost('/api/refuels/manual', {
+            liters: litros,
+            price_per_l: precio,
+            station: estacion || null,
+            ts: fechaRaw ? new Date(fechaRaw).toISOString() : null,
+            full_tank: full
         });
         const d = await r.json();
         if (d.ok) {

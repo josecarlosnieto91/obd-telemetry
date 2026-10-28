@@ -4,6 +4,7 @@
 {% block content %}
 <div class="dashboard">
     <h1>Dashboard del Vehículo</h1>
+    <p class="frescura" id="frescura" aria-live="polite"></p>
 
     <!-- Stats cards -->
     <div class="stats-grid">
@@ -128,6 +129,25 @@ async function update() {
         const d = await r.json();
 
         if (d.connected) {
+            // Frescura del dato: si la última lectura no es de ahora, se dice
+            // y se atenúa el panel (antes se pintaban valores viejos igual que
+            // los actuales, y el coche puede llevar semanas parado).
+            const f = d.frescura || {};
+            const banner = document.getElementById('frescura');
+            if (banner) {
+                if (f.estado === 'viejo' || f.estado === 'obsoleto') {
+                    banner.textContent = `⚠️ Última lectura: ${f.etiqueta} (${f.ts || 'sin fecha'}) — estos valores NO son actuales`;
+                    banner.className = 'frescura stale';
+                    document.querySelector('.dashboard').classList.add('datos-viejos');
+                } else if (f.estado === 'desconocido') {
+                    banner.textContent = 'Última lectura: fecha desconocida';
+                    banner.className = 'frescura stale';
+                } else {
+                    banner.textContent = `Datos actualizados ${f.etiqueta || ''}`;
+                    banner.className = 'frescura';
+                    document.querySelector('.dashboard').classList.remove('datos-viejos');
+                }
+            }
             // RPM y velocidad: si no hay lectura (null), mostrar 0 (coche parado)
             gauges.rpm.textContent = (d.rpm ?? 0).toLocaleString('es');
             gauges.speed.textContent = d.speed ?? 0;
@@ -160,27 +180,11 @@ async function update() {
                 ).join('');
                 dtcBox.innerHTML =
                     `<ul class="dtc-list">${dtcList}</ul>
-                     <p class="muted" style="margin-top:8px;"><a href="/dtcs">Detalle completo en el historial de DTCs →</a></p>
-                     <p class="muted" style="margin-top:4px;">
-                       <button class="btn" style="font-size:12px;padding:3px 8px;" onclick="clearDtcs()">🗑 Borrar DTCs</button>
-                       <span class="muted" style="font-size:11px;"> (para verificar tras el mantenimiento)</span>
-                     </p>`;
+                     <p class="muted" style="margin-top:8px;"><a href="/dtcs">Ver el historial y marcar un código como resuelto →</a></p>`;
                 document.getElementById('dtc-summary').className = 'card danger';
             } else {
                 dtcBox.innerHTML = '<p class="muted">Sin códigos registrados</p>';
                 document.getElementById('dtc-summary').className = 'card';
-            }
-        }
-
-        // Marca los DTCs como borrados (cleared=1) — no los elimina del histórico
-        async function clearDtcs() {
-            if (!confirm('¿Marcar todos los DTCs como borrados? No se eliminan del histórico — sirve para verificar si el mantenimiento los resolvió.')) return;
-            const r = await fetch('/api/dtcs/clear', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'});
-            const j = await r.json();
-            if (j.success) {
-                location.reload();
-            } else {
-                alert('Error al borrar DTCs');
             }
         }
 

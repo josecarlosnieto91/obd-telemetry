@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+{% block title %}Consumo — OBD Telemetry{% endblock %}
+
+{% block content %}
+<div class="page">
+    <h1>Consumo y coste</h1>
+    <p class="subtitle">Tres fuentes separadas: lo que marca el cuadro por CAN, el consumo real
+        depósito a depósito (contra surtidor) y lo que costó el combustible.</p>
+
+    <div class="stats-grid" id="resumen-consumo">
+        <div class="stat-card"><div class="stat-label">Cargando</div><div class="stat-value">—</div></div>
+    </div>
+
+    <div class="card">
+        <h2>Consumo diario (CAN del cuadro) — últimos <span id="dias">90</span> días</h2>
+        <div class="chart-wrap"><canvas id="chartDiario"></canvas></div>
+        <p class="muted" id="nota-diario" style="margin-top:8px;"></p>
+    </div>
+
+    <div class="card">
+        <h2>Por mes: real vs cuadro</h2>
+        <div class="table-wrap">
+            <table id="tabla-mensual">
+                <thead><tr>
+                    <th>Mes</th><th>Real l/100</th><th>Cuadro l/100</th>
+                    <th class="hide-mobile">€/100 km</th><th class="hide-mobile">Litros</th>
+                    <th>Coste</th>
+                </tr></thead>
+                <tbody><tr><td colspan="6" class="muted">Cargando…</td></tr></tbody>
+            </table>
+        </div>
+        <p class="muted" id="nota-mensual" style="margin-top:8px;"></p>
+    </div>
+
+    <div class="card" id="card-aviso" style="display:none">
+        <h2>⚠️ Dato no fiable</h2>
+        <p class="muted" id="aviso"></p>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const nf = (v, d = 1) => (v === null || v === undefined) ? '—' : Number(v).toFixed(d);
+
+function tarjeta(label, valor, unidad) {
+    return `<div class="stat-card"><div class="stat-label">${label}</div>
+        <div class="stat-value">${valor}</div><div class="stat-unit">${unidad}</div></div>`;
+}
+
+async function cargar() {
+    const r = await fetch('/api/consumo?dias=90');
+    const d = await r.json();
+    const mensual = d.mensual || [];
+    const serie = d.serie_diaria || [];
+
+    document.getElementById('dias').textContent = d.dias;
+
+    // Tarjetas: último mes con dato real, y media del cuadro
+    const conReal = mensual.filter(m => m.real_medio);
+    const ultimo = conReal[conReal.length - 1];
+    const cuadroMedio = mensual.length
+        ? mensual.reduce((a, m) => a + (m.cuadro_medio || 0), 0) / mensual.filter(m => m.cuadro_medio).length
+        : null;
+    const costeTotal = mensual.reduce((a, m) => a + (m.coste_eur || 0), 0);
+    const litrosTotal = mensual.reduce((a, m) => a + (m.litros || 0), 0);
+    document.getElementById('resumen-consumo').innerHTML =
+        tarjeta('Real (último mes)', nf(ultimo?.real_medio, 2), 'l/100 km') +
+        tarjeta('Cuadro (CAN)', nf(cuadroMedio, 2), 'l/100 km') +
+        tarjeta('Coste combustible', nf(costeTotal, 2), '€') +
+        tarjeta('Litros repostados', nf(litrosTotal, 2), 'L');
+
+    document.getElementById('nota-mensual').textContent = conReal.length
+        ? `El consumo real solo existe en los meses con repostaje completo: ${conReal.length} de ${mensual.length} meses.`
+        : 'Sin repostajes completos: no hay consumo real que enseñar (la estimación no sustituye al surtidor).';
+
+    // Tabla mensual
+    const tbody = document.querySelector('#tabla-mensual tbody');
+    if (!mensual.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="muted">Sin datos de consumo.</td></tr>';
+    } else {
+        tbody.innerHTML = mensual.slice().reverse().map(m => `<tr>
+            <td>${m.mes}</td>
+            <td>${nf(m.real_medio, 2)}</td>
+            <td>${nf(m.cuadro_medio, 2)}</td>
+            <td class="hide-mobile">${nf(m.eur_100km, 2)}</td>
+            <td class="hide-mobile">${nf(m.litros, 2)}</td>
+            <td>${m.coste_eur === null || m.coste_eur === undefined ? '—' : nf(m.coste_eur, 2) + ' €'}</td>
+        </tr>`).join('');
+    }
+
+    // Gráfica diaria
+    const ctx = document.getElementById('chartDiario').getContext('2d');
+    if (!serie.length) {
+        document.getElementById('nota-diario').textContent = 'Sin lecturas CAN en el periodo.';
+        return;
+    }
+    const media = serie.reduce((a, s) => a + s.cuadro, 0) / serie.length;
+    new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: serie.map(s => s.dia.slice(5)),
+            datasets: [{
+                label: 'Consumo del cuadro (l/100 km)', data: serie.map(s => s.cuadro),
+                borderColor: '#00ff88', backgroundColor: 'rgba(0,255,136,0.12)',
+                fill: true, tension: 0.3, pointRadius: 0
+            }, {
+                label: 'Media del periodo', data: serie.map(() => media),
+                borderColor: '#ffaa00', borderDash: [6, 4], pointRadius: 0, fill: false
+            }]
+        },
+        options: {
+            responsive: true, maintainAspectRatio: false, animation: { duration: 300 },
+            plugins: { legend: { labels: { color: '#ccc' } } },
+            scales: {
+                x: { ticks: { color: '#888', maxTicksLimit: 8 }, grid: { color: '#222' } },
+                y: { ticks: { color: '#888' }, grid: { color: '#222' }, min: 0 }
+            }
+        }
+    });
+    document.getElementById('nota-diario').textContent =
+        `${serie.length} días con lecturas · media ${media.toFixed(2)} l/100 km (marcado por el cuadro, no es consumo real de surtidor)`;
+
+    if (d.aviso) {
+        document.getElementById('card-aviso').style.display = 'block';
+        document.getElementById('aviso').textContent = d.aviso;
+    }
+}
+
+cargar();
+</script>
+{% endblock %}

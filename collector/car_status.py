@@ -208,6 +208,10 @@ def get_diagnostics(conn):
         sys.stderr.write(f"battery diag fail: {e}\n")
 
     # ── Termostato: en viajes > thermostat_trip_km, la temp debe superar el mínimo
+    #    Medido el 2026-10-28: 89,6 % de las lecturas en crucero (speed>70) están
+    #    por debajo de 80 °C y 11 de 37 viajes de más de 20 km no pasan nunca de
+    #    80 °C (uno de 109 km acabó en 80,0 °C). Con el umbral antiguo (78) el
+    #    diagnóstico decía «OK» con 78 °C. Un DW10BTED4 en servicio va a 85-92 °C.
     thermostat = {"status": "nodata", "label": "—", "detail": f"Necesita un viaje de >{thr.get('thermostat_trip_km', 20):.0f} km", "value": None}
     try:
         c.execute("""
@@ -222,10 +226,32 @@ def get_diagnostics(conn):
             # Usar el viaje más reciente con max_speed > speed_econ_kmh (crucero real)
             real = next((t for t in trips if (t["max_speed"] or 0) > thr.get("speed_econ_kmh", 60)), trips[0])
             mt = real["max_temp"]
-            if mt is not None and mt < thr.get("thermostat_min_c", 75.0):
+            if mt is not None and mt < thr.get("thermostat_min_c", 82.0):
                 thermostat = {"status": "warn", "label": "Sospecha", "detail": f"Temp máx {mt:.0f}°C en viaje de {real['distance_km']:.0f} km (termostato puede estar abierto)", "value": round(mt, 1)}
             elif mt is not None:
                 thermostat = {"status": "ok", "label": "OK", "detail": f"Temp máx {mt:.0f}°C en viaje de {real['distance_km']:.0f} km", "value": round(mt, 1)}
+        # Señal de crucero, independiente del viaje concreto: si la mayoría de
+        # las lecturas a velocidad de crucero van frías, el motor no está en
+        # temperatura de servicio aunque algún viaje suelto llegue arriba.
+        c.execute("""
+            SELECT COUNT(*) AS n, SUM(coolant_temp < ?) AS frias, AVG(coolant_temp) AS media
+            FROM readings WHERE speed > ? AND coolant_temp IS NOT NULL
+        """, (thr.get("thermostat_cruise_min_c", 80), thr.get("speed_cruise_kmh", 80)))
+        cru = c.fetchone()
+        if cru and cru["n"] and cru["n"] >= 20:
+            pct = 100.0 * (cru["frias"] or 0) / cru["n"]
+            minimo = thr.get("thermostat_cruise_min_c", 80)
+            pct_max = thr.get("thermostat_cruise_frias_pct", 50)
+            if pct >= pct_max:
+                detalle = (f"{pct:.0f}% de las lecturas en crucero por debajo de "
+                           f"{minimo:.0f}°C (media {cru['media']:.0f}°C, {cru['n']} muestras)")
+                # No se pisa un aviso de viaje ya emitido: el de crucero es el
+                # mismo hallazgo con más evidencia.
+                if thermostat["status"] != "warn":
+                    thermostat = {"status": "warn", "label": "Motor frío",
+                                  "detail": detalle, "value": round(cru["media"], 1)}
+                else:
+                    thermostat["detail"] += f" · {detalle}"
     except Exception as e:
         sys.stderr.write(f"thermostat diag fail: {e}\n")
 

@@ -5,77 +5,130 @@
 <div class="page">
     <h1>Alertas del Vehículo</h1>
     <div class="filter-bar">
-        <button onclick="filterAlerts('all')" class="btn active" id="f-all">Todas</button>
-        <button onclick="filterAlerts('critical')" class="btn" id="f-critical">Críticas</button>
-        <button onclick="filterAlerts('warning')" class="btn" id="f-warning">Advertencias</button>
-        <button onclick="filterAlerts('info')" class="btn" id="f-info">Información</button>
+        <button onclick="cambiarFiltro('all')" class="btn active" id="f-all">Todas</button>
+        <button onclick="cambiarFiltro('critical')" class="btn" id="f-critical">Críticas</button>
+        <button onclick="cambiarFiltro('warning')" class="btn" id="f-warning">Advertencias</button>
+        <button onclick="cambiarFiltro('info')" class="btn" id="f-info">Información</button>
+        <button onclick="alternarAgrupacion()" class="btn active" id="f-grupo" title="Une los avisos que dicen lo mismo">Agrupar repetidas</button>
     </div>
-    <div id="alerts-list">
-        <p class="muted">Cargando alertas...</p>
-    </div>
+    <p class="muted" id="alerts-resumen">Cargando alertas…</p>
+    <div id="alerts-list"></div>
+    <p style="margin-top:12px;"><button class="btn" id="mas" style="display:none" onclick="cargarMas()">Cargar más</button></p>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-let allAlerts = [];
+// Se pagina en servidor (el total llega en X-Total-Count) y se agrupan los
+// avisos repetidos. Antes la página pedía 100 de 195 alertas y las pintaba
+// todas seguidas: 11.242 px de scroll en un móvil de 390 (medido 2026-10-28),
+// y 119 de esas alertas eran el mismo consejo de «trayecto corto».
+let alertas = [];
+let total = 0;
+let filtro = 'all';
+let agrupar = true;
+const PAGINA = 100;
 
-async function loadAlerts() {
-    const r = await fetch('/api/alerts');
-    allAlerts = await r.json();
-    renderAlerts('all');
+async function cargar(reiniciar) {
+    const offset = reiniciar ? 0 : alertas.length;
+    const q = new URLSearchParams({ limit: PAGINA, offset: offset });
+    if (filtro !== 'all') q.set('severity', filtro);
+    const r = await fetch('/api/alerts?' + q.toString());
+    const nuevas = await r.json();
+    total = parseInt(r.headers.get('X-Total-Count') || '0', 10);
+    alertas = reiniciar ? nuevas : alertas.concat(nuevas);
+    pintar();
 }
 
-function renderAlerts(filter) {
-    const el = document.getElementById('alerts-list');
-    const filtered = filter === 'all' ? allAlerts : allAlerts.filter(a => a.severity === filter);
+function cargarMas() { cargar(false); }
 
-    if (filtered.length === 0) {
-        el.innerHTML = '<p class="muted">No hay alertas registradas.</p>';
+function cambiarFiltro(sev) {
+    filtro = sev;
+    document.querySelectorAll('#f-all, #f-critical, #f-warning, #f-info').forEach(b => b.classList.remove('active'));
+    document.getElementById('f-' + sev).classList.add('active');
+    cargar(true);
+}
+
+function alternarAgrupacion() {
+    agrupar = !agrupar;
+    document.getElementById('f-grupo').classList.toggle('active', agrupar);
+    pintar();
+}
+
+const ICONOS = { critical: '🔴', warning: '🟡', info: '💡' };
+const SEVERIDAD = { critical: 'Crítica', warning: 'Advertencia', info: 'Info' };
+const CATEGORIAS = {
+    conduccion: 'Conducción', mantenimiento: 'Mantenimiento', uso: 'Uso',
+    temp: 'Temperatura', battery: 'Batería', rpm: 'RPM', fuel: 'Combustible',
+    dtc: 'DTC', thermostat: 'Termostato', diagnostico: 'Diagnóstico'
+};
+
+function tarjeta(a, veces) {
+    const ts = a.timestamp ? new Date(a.timestamp).toLocaleString('es') : '—';
+    const cat = CATEGORIAS[a.category] || a.category;
+    const badge = veces > 1
+        ? `<span class="alert-severity" title="Avisos idénticos agrupados">×${veces}</span>` : '';
+    return `<div class="alert-card severity-${a.severity}">
+        <div class="alert-icon">${ICONOS[a.severity] || '💡'}</div>
+        <div class="alert-body">
+            <div class="alert-header">
+                <span class="alert-category">${cat}</span>
+                <span class="alert-severity">${SEVERIDAD[a.severity] || a.severity}</span>
+                ${badge}
+                <span class="alert-time">${ts}</span>
+            </div>
+            <div class="alert-message">${a.message}</div>
+        </div>
+        ${a.acknowledged ? '' : `<button class="btn-ack" onclick="reconocer(${a.id})" aria-label="Marcar como revisada">✓</button>`}
+    </div>`;
+}
+
+// Clave de agrupación: el mismo texto salvo los números («Trayecto corto
+// (6 min)» y «(7 min)» son el mismo consejo).
+function clave(a) {
+    return a.category + '|' + a.severity + '|' + String(a.message).replace(/\d+([.,]\d+)?/g, 'N');
+}
+
+function pintar() {
+    const el = document.getElementById('alerts-list');
+    const resumen = document.getElementById('alerts-resumen');
+    const mas = document.getElementById('mas');
+
+    if (alertas.length === 0) {
+        el.innerHTML = '<p class="muted">No hay alertas registradas para este filtro.</p>';
+        resumen.textContent = '';
+        mas.style.display = 'none';
         return;
     }
 
-    let html = '';
-    for (const a of filtered) {
-        const ts = a.timestamp ? new Date(a.timestamp).toLocaleString('es') : '—';
-        const icon = a.severity === 'critical' ? '🔴' : a.severity === 'warning' ? '🟡' : '💡';
-        const sevLabel = a.severity === 'critical' ? 'Crítica' : a.severity === 'warning' ? 'Advertencia' : 'Info';
-        const catLabel = a.category === 'conduccion' ? 'Conducción' : a.category === 'mantenimiento' ? 'Mantenimiento' : a.category === 'uso' ? 'Uso' : a.category === 'temp' ? 'Temperatura' : a.category === 'battery' ? 'Batería' : a.category === 'rpm' ? 'RPM' : a.category === 'fuel' ? 'Combustible' : a.category === 'dtc' ? 'DTC' : a.category;
-
-        html += `<div class="alert-card severity-${a.severity}">
-            <div class="alert-icon">${icon}</div>
-            <div class="alert-body">
-                <div class="alert-header">
-                    <span class="alert-category">${catLabel}</span>
-                    <span class="alert-severity">${sevLabel}</span>
-                    <span class="alert-time">${ts}</span>
-                </div>
-                <div class="alert-message">${a.message}</div>
-            </div>
-            ${a.acknowledged ? '' : `<button class="btn-ack" onclick="acknowledge(${a.id})">✓</button>`}
-        </div>`;
+    let filas;
+    if (agrupar) {
+        const mapa = new Map();
+        for (const a of alertas) {
+            const k = clave(a);
+            if (mapa.has(k)) { mapa.get(k).veces++; }
+            else { mapa.set(k, { a: a, veces: 1 }); }
+        }
+        filas = [...mapa.values()];
+    } else {
+        filas = alertas.map(a => ({ a: a, veces: 1 }));
     }
-    el.innerHTML = html;
+
+    el.innerHTML = filas.map(f => tarjeta(f.a, f.veces)).join('');
+    const sinRevisar = alertas.filter(a => !a.acknowledged).length;
+    resumen.textContent = `Mostrando ${alertas.length} de ${total} alertas`
+        + (agrupar ? ` · agrupadas en ${filas.length} avisos distintos` : '')
+        + ` · ${sinRevisar} sin revisar en esta página`;
+    mas.style.display = alertas.length < total ? 'inline-block' : 'none';
 }
 
-function filterAlerts(sev) {
-    document.querySelectorAll('.filter-bar .btn').forEach(b => b.classList.remove('active'));
-    document.getElementById('f-' + sev).classList.add('active');
-    renderAlerts(sev);
+async function reconocer(id) {
+    await apiPost('/api/alerts/acknowledge', { id });
+    const a = alertas.find(x => x.id === id);
+    if (a) a.acknowledged = 1;
+    pintar();
 }
 
-async function acknowledge(id) {
-    await fetch('/api/alerts/acknowledge', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({id})
-    });
-    // Update local state
-    const alert = allAlerts.find(a => a.id === id);
-    if (alert) alert.acknowledged = 1;
-    renderAlerts(document.querySelector('.filter-bar .active')?.id?.replace('f-', '') || 'all');
-}
-
-loadAlerts();
+cargar(true);
 </script>
 {% endblock %}

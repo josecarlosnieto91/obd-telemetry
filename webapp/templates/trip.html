@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+{% block title %}Viaje {{ trip_id }} — OBD Telemetry{% endblock %}
+
+{% block content %}
+<div class="page">
+    <p class="muted"><a href="/trips">← Todos los viajes</a></p>
+    <h1 id="titulo">Viaje {{ trip_id }}</h1>
+    <div id="detalle"><p class="muted">Cargando viaje…</p></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Página propia para un viaje: URL compartible (/trip/388) además del modal
+// de /trips. Los datos salen del mismo endpoint que usa el modal.
+const TRIP_ID = {{ trip_id }};
+const DIAS = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
+
+function stat(label, valor, unidad) {
+    return `<div class="stat-card"><div class="stat-label">${label}</div>
+        <div class="stat-value">${valor}</div><div class="stat-unit">${unidad}</div></div>`;
+}
+
+function consumoTexto(t) {
+    if (t.real_l100 !== null && t.real_l100 !== undefined) {
+        return { valor: Number(t.real_l100).toFixed(1), etiqueta: 'Real (surtidor)', clase: '' };
+    }
+    if (t.consumption_l100 !== null && t.consumption_l100 !== undefined) {
+        return { valor: Number(t.consumption_l100).toFixed(1), etiqueta: 'Estimado / cuadro', clase: 'muted' };
+    }
+    return { valor: '—', etiqueta: 'sin datos suficientes', clase: 'muted' };
+}
+
+async function cargar() {
+    const r = await fetch(`/api/trip/${TRIP_ID}`);
+    const el = document.getElementById('detalle');
+    if (!r.ok) {
+        el.innerHTML = `<p class="muted">Ese viaje no existe: puede haberse fusionado con otro
+            o haberse reprocesado.</p><p><a class="btn" href="/trips">Ver todos los viajes</a></p>`;
+        return;
+    }
+    const d = await r.json();
+    const t = d.trip;
+    const inicio = t.start_time ? new Date(t.start_time) : null;
+    document.getElementById('titulo').textContent = inicio
+        ? `Viaje del ${DIAS[inicio.getDay()]} ${inicio.toLocaleDateString('es')}`
+        : `Viaje ${TRIP_ID}`;
+
+    const cons = consumoTexto(t);
+    const partes = [];
+    partes.push(`<div class="stats-grid">
+        ${stat('Distancia', t.distance_km ? Number(t.distance_km).toFixed(2) : '—', 'km')}
+        ${stat('Duración', t.driving_minutes || '—', 'min')}
+        ${stat('Vel. media', t.avg_speed ? Number(t.avg_speed).toFixed(0) : '—', 'km/h')}
+        ${stat('Vel. máx', t.max_speed ? Number(t.max_speed).toFixed(0) : '—', 'km/h')}
+        ${stat('RPM máx', t.max_rpm ? Number(t.max_rpm).toFixed(0) : '—', 'rpm')}
+        ${stat('Consumo', cons.valor, 'l/100 · ' + cons.etiqueta)}
+    </div>`);
+
+    // Origen/destino si el viaje los tiene (los rellena trip_summary/Janus)
+    if (t.start_place || t.end_place) {
+        partes.push(`<div class="card"><p>📍 <b>${t.start_place || '—'}</b> → <b>${t.end_place || '—'}</b></p></div>`);
+    }
+
+    partes.push(`<div class="card">
+        <h2>Descargas</h2>
+        <p><a class="btn" href="/api/trip/${TRIP_ID}/gpx">⬇︎ Trazado GPX</a>
+           <a class="btn" href="/api/trip/${TRIP_ID}/csv">⬇︎ Lecturas CSV</a>
+           <a class="btn" href="/map?session_id=${TRIP_ID}">🗺️ Ver en el mapa</a></p>
+    </div>`);
+
+    if (d.dtcs && d.dtcs.length) {
+        partes.push('<div class="card"><h2>🔧 Códigos de error detectados</h2><ul class="dtc-list">' +
+            d.dtcs.map(x => `<li><strong>${x.code}</strong>: ${x.description || 'sin descripción'}</li>`).join('') +
+            '</ul></div>');
+    }
+
+    if (d.tips && d.tips.length) {
+        partes.push('<div class="card"><h2>💡 Consejos del viaje</h2><ul>' +
+            d.tips.map(x => `<li>${x.severity === 'warning' ? '⚠️' : 'ℹ️'} ${x.message}</li>`).join('') +
+            '</ul></div>');
+    }
+
+    if (d.readings && d.readings.length > 1) {
+        partes.push(`<div class="card"><h2>Velocidad y temperatura</h2>
+            <div class="chart-wrap"><canvas id="chartViaje"></canvas></div></div>`);
+    }
+
+    el.innerHTML = partes.join('');
+
+    if (d.readings && d.readings.length > 1) {
+        const ctx = document.getElementById('chartViaje').getContext('2d');
+        new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: d.readings.map(x => x.timestamp.split('T')[1]?.slice(0, 5) || ''),
+                datasets: [
+                    { label: 'Velocidad', data: d.readings.map(x => x.speed ?? 0),
+                      borderColor: '#00ff88', backgroundColor: 'rgba(0,255,136,0.1)',
+                      fill: true, tension: 0.3, pointRadius: 0 },
+                    { label: 'Temp. °C', data: d.readings.map(x => x.coolant_temp ?? 0),
+                      borderColor: '#ff6633', borderDash: [5, 5], pointRadius: 0, yAxisID: 'y1' }
+                ]
+            },
+            options: {
+                responsive: true, maintainAspectRatio: false, animation: { duration: 300 },
+                plugins: { legend: { labels: { color: '#ccc' } } },
+                scales: {
+                    x: { ticks: { color: '#888', maxTicksLimit: 8 }, grid: { color: '#222' } },
+                    y: { ticks: { color: '#888' }, grid: { color: '#222' }, min: 0 },
+                    y1: { position: 'right', ticks: { color: '#f63' }, grid: { display: false } }
+                }
+            }
+        });
+    }
+}
+
+cargar();
+</script>
+{% endblock %}

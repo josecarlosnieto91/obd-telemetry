@@ -67,6 +67,26 @@ DENSITY_FUEL = _fuel_density()  # g/L — usado en el cálculo de consumo MAF
 DIESEL_AFR = 30.0               # relación aire-combustible diésel típico en crucero
                                 # (fallback cuando no hay fuel_rate del PID 015E)
 
+
+def _maf_factor():
+    """Factor de corrección del consumo estimado por MAF.
+
+    Medido el 2026-10-28 sobre los viajes con consumo real de surtidor: la
+    estimación MAF daba 5,08 l/100 km donde el surtidor dice 9,73 → subestima
+    ×1,92 (el MAF de este coche mide menos aire del que realmente entra, o el
+    AFR fijo de 30 no es el de carga real). Se aplica como corrección explícita
+    y configurable (`vehicle.maf_consumption_factor`), y la cifra resultante se
+    sigue etiquetando como ESTIMADA: el dato bueno es el del surtidor.
+    """
+    try:
+        with open(CONFIG_PATH) as fh:
+            return float(json.load(fh).get("vehicle", {}).get("maf_consumption_factor", 1.0))
+    except Exception:
+        return 1.0
+
+
+MAF_FACTOR = _maf_factor()
+
 # Dónde vive el dashboard web, para enlazarlo desde los resúmenes de viaje.
 # Configurable en obd_vehicle_config.json → "webapp": {"site_url": "..."}.
 # El valor por defecto es la URL de la tailnet (MagicDNS, no IP: la IP cambia
@@ -488,10 +508,10 @@ def session_metrics(conn, c, sid, end_ts=None, start_hint=None):
                     t1, t2 = parse_ts(prev_r["timestamp"]), parse_ts(r["timestamp"])
                     if t1 and t2:
                         dt_h = (t2 - t1).total_seconds() / 3600.0
-                        litros += (r["maf"] / DIESEL_AFR / DENSITY_FUEL) * dt_h
+                        litros += (r["maf"] / DIESEL_AFR / DENSITY_FUEL) * dt_h * MAF_FACTOR
                 prev_r = r
                 if r["speed"] and r["speed"] > 3:
-                    l100 = (r["maf"] / DIESEL_AFR / DENSITY_FUEL) * 3600.0 / r["speed"] * 100.0
+                    l100 = (r["maf"] / DIESEL_AFR / DENSITY_FUEL) * 3600.0 / r["speed"] * 100.0 * MAF_FACTOR
                     if 0 < l100 < 60:
                         cons_inst.append(l100)
     cons_medio = (sum(cons_inst) / len(cons_inst)) if cons_inst else None
