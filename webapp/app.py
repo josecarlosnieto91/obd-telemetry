@@ -989,10 +989,14 @@ def api_consumo():
         sys.stderr.write(f"[webapp] consumo CAN: {e}\n")
 
     real_mes = {}
-    c.execute("""
+    # Igual que en /api/trips: si la columna real_l100 aún no existe (BD vieja),
+    # la página no se puede tumbar; se degrada a «sin consumo real».
+    cols_ses = {r[1] for r in c.execute("PRAGMA table_info(sessions)")}
+    real_col = "real_l100" if "real_l100" in cols_ses else "NULL"
+    c.execute(f"""
         SELECT substr(start_time,1,7) AS mes, COUNT(*) AS viajes,
-               AVG(real_l100) AS real_medio, SUM(distance_km) AS km
-        FROM sessions WHERE real_l100 IS NOT NULL GROUP BY mes
+               AVG({real_col}) AS real_medio, SUM(distance_km) AS km
+        FROM sessions WHERE {real_col} IS NOT NULL GROUP BY mes
     """)
     for r in c.fetchall():
         real_mes[r["mes"]] = dict(r)
@@ -1055,7 +1059,23 @@ def api_consumo():
         pass
 
     conn.close()
-    return jsonify({"mensual": mensual, "serie_diaria": serie, "dias": dias, "aviso": aviso})
+    # Referencia del modelo (ficha del fabricante, docs/parametros-referencia-c4.md)
+    specs = (_config().get("vehicle") or {}).get("specs") or {}
+    referencia = None
+    if specs.get("consumption_combined_l100"):
+        referencia = {
+            "consumo_medio_homologado": specs.get("consumption_combined_l100"),
+            "consumo_urbano_homologado": specs.get("consumption_urban_l100"),
+            "consumo_extraurbano_homologado": specs.get("consumption_extraurban_l100"),
+            "fuente": specs.get("source"),
+        }
+        # Diferencia del último real medido frente al homologado medio.
+        reales = [m["real_medio"] for m in mensual if m.get("real_medio")]
+        if reales:
+            referencia["desviacion_pct"] = round(
+                100.0 * (reales[-1] / referencia["consumo_medio_homologado"] - 1.0), 1)
+    return jsonify({"mensual": mensual, "serie_diaria": serie, "dias": dias,
+                    "aviso": aviso, "referencia": referencia})
 
 
 # ── Descargas por viaje ───────────────────────────────────────

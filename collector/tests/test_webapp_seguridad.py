@@ -166,3 +166,42 @@ def test_etag_permite_no_repetir_respuestas(client):
     r2 = client.get("/api/alerts?limit=5", headers={"If-None-Match": etag})
     assert r2.status_code == 304
     assert r2.get_data() == b""
+
+
+# ── Referencia del fabricante en el consumo ───────────────────
+
+def test_consumo_compara_con_la_ficha_del_modelo(client, monkeypatch):
+    """El panel dice el consumo real frente al homologado del modelo (6,1 l/100
+    medio para el Grand C4 Picasso HDi 138), no frente a la nada."""
+    mod = sys.modules["webapp_under_test"]
+    monkeypatch.setattr(mod, "_config", lambda: {"vehicle": {"specs": {
+        "consumption_combined_l100": 6.1,
+        "consumption_urban_l100": 7.9,
+        "consumption_extraurban_l100": 5.1,
+        "source": "ficha de prueba",
+    }}})
+    # Tablas que consulta /api/consumo
+    import sqlite3 as s3
+    con = s3.connect(mod.DB_PATH)
+    # Tabla sessions completa: /api/consumo usa start_time, distance_km y real_l100
+    con.execute("DROP TABLE IF EXISTS sessions")
+    con.execute("CREATE TABLE sessions (id INTEGER PRIMARY KEY, start_time TEXT, "
+                "end_time TEXT, status TEXT, distance_km REAL, real_l100 REAL, "
+                "consumption_l100 REAL, max_speed REAL, avg_speed REAL, max_rpm REAL, "
+                "driving_minutes INTEGER)")
+    con.execute("CREATE TABLE IF NOT EXISTS can_readings (id INTEGER PRIMARY KEY, "
+                "session_id INTEGER, ts TEXT, consumption_l100 REAL, range_km REAL, "
+                "odometer_km REAL)")
+    con.execute("CREATE TABLE IF NOT EXISTS refuels (id INTEGER PRIMARY KEY, ts TEXT, "
+                "liters REAL, price_per_l REAL, cost REAL, station TEXT, full_tank INTEGER, "
+                "source TEXT, station_addr TEXT, station_dist_m REAL, car_lat REAL, car_lon REAL, "
+                "session_id INTEGER, prev_ts TEXT, fuel_before REAL, fuel_after REAL, jump_pct REAL)")
+    con.commit()
+    con.close()
+
+    r = client.get("/api/consumo")
+    assert r.status_code == 200, r.get_data(as_text=True)
+    ref = r.get_json()["referencia"]
+    assert ref["consumo_medio_homologado"] == 6.1
+    assert ref["consumo_urbano_homologado"] == 7.9
+    assert ref["fuente"] == "ficha de prueba"

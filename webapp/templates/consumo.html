@@ -70,9 +70,15 @@ async function cargar() {
         tarjeta('Coste combustible', nf(costeTotal, 2), '€') +
         tarjeta('Litros repostados', nf(litrosTotal, 2), 'L');
 
-    document.getElementById('nota-mensual').textContent = conReal.length
+    let nota = conReal.length
         ? `El consumo real solo existe en los meses con repostaje completo: ${conReal.length} de ${mensual.length} meses.`
         : 'Sin repostajes completos: no hay consumo real que enseñar (la estimación no sustituye al surtidor).';
+    // Comparación con la ficha del fabricante (6,1 l/100 medio para este modelo)
+    if (d.referencia && d.referencia.desviacion_pct !== undefined) {
+        nota += ` Homologado ${d.referencia.consumo_medio_homologado} l/100 (${d.referencia.fuente});`
+            + ` el último mes real va ${d.referencia.desviacion_pct > 0 ? '+' : ''}${d.referencia.desviacion_pct} %.`;
+    }
+    document.getElementById('nota-mensual').textContent = nota;
 
     // Tabla mensual
     const tbody = document.querySelector('#tabla-mensual tbody');
