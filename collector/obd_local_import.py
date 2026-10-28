@@ -75,6 +75,11 @@ def connect_db(path, wal=True):
             consumption_l100 REAL,
             range_km REAL,
             odometer_km REAL)""")
+        # Índice por ts: sin él, cada consulta de rango/consumo de la webapp
+        # (`ORDER BY ts DESC LIMIT 1`) escaneaba la tabla entera + TEMP B-TREE.
+        # Medido 2026-10-28 con 86.738 filas y /api/status cada 5 s por cliente.
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_can_readings_ts "
+                     "ON can_readings(ts)")
     except sqlite3.OperationalError:
         pass
     return conn
