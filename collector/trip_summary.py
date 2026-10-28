@@ -64,8 +64,38 @@ def _threshold(key, fallback):
 
 
 DENSITY_FUEL = _fuel_density()  # g/L — usado en el cálculo de consumo MAF
-DIESEL_AFR = 30.0               # relación aire-combustible diésel típica en crucero
+DIESEL_AFR = 30.0               # relación aire-combustible diésel típico en crucero
                                 # (fallback cuando no hay fuel_rate del PID 015E)
+
+# Dónde vive el dashboard web, para enlazarlo desde los resúmenes de viaje.
+# Configurable en obd_vehicle_config.json → "webapp": {"site_url": "..."}.
+# El valor por defecto es la URL de la tailnet (MagicDNS, no IP: la IP cambia
+# y JC accede desde el móvil con Tailscale).
+SITE_URL_DEFAULT = "https://cassiopeia.tail765684.ts.net:8446"
+
+
+def site_url():
+    """URL pública del dashboard (config `webapp.site_url`, sin barra final)."""
+    try:
+        with open(CONFIG_PATH) as fh:
+            url = (json.load(fh).get("webapp", {}) or {}).get("site_url")
+    except Exception:
+        url = None
+    return (url or SITE_URL_DEFAULT).rstrip("/")
+
+
+def site_link(session_id=None):
+    """Línea con el enlace al dashboard; con `session_id`, al viaje concreto.
+
+    El destino es /trips?trip=<id>, que abre el detalle de ese viaje (enlace
+    permanente). Se devuelve "" si no hay URL configurada.
+    """
+    base = site_url()
+    if not base:
+        return ""
+    if session_id is None:
+        return f"🔗 {base}/trips"
+    return f"🔗 {base}/trips?trip={session_id}"
 
 
 def connect_db(path, row_factory=True):
@@ -698,6 +728,11 @@ def main():
                 lines.append(f"📍 inicio: {first_place}")
             if last_place:
                 lines.append(f"📍 fin: {last_place}")
+        # Enlace al dashboard, directo al detalle de ESTE viaje. JC lo ve en
+        # Telegram y desde ahí abre el sitio (coche/móvil con Tailscale).
+        enlace = site_link(sid)
+        if enlace:
+            lines.append(enlace)
         report = "\n".join(lines)
 
         # Janus: evento + trip en context.db

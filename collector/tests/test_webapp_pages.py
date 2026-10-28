@@ -9,6 +9,7 @@ Un `node --check` por bloque <script> caza esa clase de fallo (y cualquier
 error de sintaxis introducido al tocar las plantillas).
 """
 import importlib.util
+import json
 import os
 import re
 import shutil
@@ -102,17 +103,24 @@ def test_confirmar_litros_conserva_los_decimales_del_surtidor(client, tmp_path,
 
 
 def test_hoja_de_estilo_sellada_con_su_fecha(client):
-    """El CSS va con `?v=<mtime>`.
+    """Los estáticos van con `?v=<mtime del más reciente de static/>`.
 
     Sin el sello el navegador sirve la copia cacheada y un cambio de estilo
     "no se aplica": se diagnostica como si la regla no existiera cuando lo que
-    pasa es que no ha llegado.
+    pasa es que no ha llegado. Desde 2026-10-28 el sello cubre también nav.js y
+    chart.umd.min.js, así que es el máximo de las tres fechas (nunca menor que
+    la de style.css).
     """
     html = client.get("/").get_data(as_text=True)
     m = re.search(r'href="(/static/style\.css\?v=(\d+))"', html)
     assert m, "la hoja de estilo no va sellada con su fecha"
-    mtime = int(os.path.getmtime(os.path.join(WEBAPP, "static", "style.css")))
-    assert int(m.group(2)) == mtime, "el sello no coincide con la fecha del fichero"
+    sello = int(m.group(2))
+    mtime_css = int(os.path.getmtime(os.path.join(WEBAPP, "static", "style.css")))
+    assert sello >= mtime_css, "el sello es más viejo que la hoja de estilo"
+    mtime_chart = int(os.path.getmtime(
+        os.path.join(WEBAPP, "static", "chart.umd.min.js")))
+    assert sello == max(mtime_css, mtime_chart), (
+        "el sello no es la fecha del estático más reciente")
 
 
 def test_css_estiliza_los_controles_nativos(client):
@@ -137,3 +145,111 @@ def test_css_estiliza_los_controles_nativos(client):
     assert any(all(d in cuerpo for d in esperadas) for cuerpo in control), (
         "ninguna regla de controles fija fondo, tinta y borde del tema: "
         "seguirían viéndose los nativos claros")
+
+
+# ── Servicio: sonda, favicon, gzip, 404 y estáticos locales ────────────────
+# Añadidos al revisar la web (2026-10-28): la app no tenía /health ni favicon
+# (404 en cada carga), no comprimía (1 MB por el mapa), devolvía 500 en un
+# viaje inexistente y cargaba Chart.js desde un CDN (sin Internet, gráfico
+# muerto en la tablet).
+
+def _bd_minima(tmp_path):
+    """BD mínima con lo que consultan /api/trips y /health."""
+    db = tmp_path / "obd.db"
+    con = sqlite3.connect(db)
+    con.execute("""CREATE TABLE sessions (
+        id INTEGER PRIMARY KEY, start_time TEXT, end_time TEXT,
+        distance_km REAL, max_speed REAL, avg_speed REAL, max_rpm REAL,
+        driving_minutes INTEGER, status TEXT, consumption_l100 REAL,
+        real_l100 REAL)""")
+    con.execute("""CREATE TABLE readings (
+        id INTEGER PRIMARY KEY, session_id INTEGER, timestamp TEXT,
+        rpm REAL, speed REAL, coolant_temp REAL, engine_load REAL,
+        throttle_pos REAL, fuel_level REAL, voltage REAL, maf REAL)""")
+    con.execute("INSERT INTO sessions (id, start_time, status, distance_km, "
+                "real_l100, consumption_l100) VALUES "
+                "(1, '2026-10-28T14:10:58', 'completed', 12.5, 5.4, 3.1)")
+    con.execute("INSERT INTO readings (session_id, timestamp, maf, speed) "
+                "VALUES (1, '2026-10-28T14:11:00', 25.0, 90.0)")
+    con.commit()
+    con.close()
+    return db
+
+
+def test_health_responde_y_dice_la_ultima_lectura(client, tmp_path, monkeypatch):
+    mod = sys.modules["webapp_under_test"]
+    monkeypatch.setattr(mod, "DB_PATH", str(_bd_minima(tmp_path)))
+    r = client.get("/health")
+    assert r.status_code == 200
+    assert r.get_json()["ok"] is True
+
+
+def test_health_avisa_si_la_bd_no_esta(client, tmp_path, monkeypatch):
+    """Una BD ausente es 503, no un 200 optimista."""
+    mod = sys.modules["webapp_under_test"]
+    monkeypatch.setattr(mod, "DB_PATH", str(tmp_path / "no-existe.db"))
+    r = client.get("/health")
+    assert r.status_code == 503
+    assert r.get_json()["ok"] is False
+
+
+def test_favicon_no_da_404(client):
+    r = client.get("/favicon.ico")
+    assert r.status_code == 200
+    assert "svg" in r.headers["Content-Type"]
+
+
+def test_viaje_inexistente_es_404_no_500(client, tmp_path, monkeypatch):
+    mod = sys.modules["webapp_under_test"]
+    monkeypatch.setattr(mod, "DB_PATH", str(_bd_minima(tmp_path)))
+    r = client.get("/api/trip/999999")
+    assert r.status_code == 404, "dict(None) → TypeError → 500"
+
+
+def test_chartjs_es_local_y_el_menu_lleva_dtcs(client):
+    html = client.get("/").get_data(as_text=True)
+    assert "cdn.jsdelivr.net" not in html, "Chart.js vuelve a depender de un CDN"
+    assert re.search(r'src="/static/chart\.umd\.min\.js\?v=\d+"', html)
+    assert client.get("/static/chart.umd.min.js").status_code == 200
+    assert 'href="/dtcs"' in html, "la página de DTCs no está en el menú"
+
+
+def test_api_grande_va_comprimida(client, tmp_path, monkeypatch):
+    mod = sys.modules["webapp_under_test"]
+    db = _bd_minima(tmp_path)
+    con = sqlite3.connect(db)
+    for i in range(2, 25):
+        con.execute("INSERT INTO sessions (id, start_time, status, distance_km) "
+                    "VALUES (?, ?, 'completed', ?)",
+                    (i, f"2026-10-{i:02d}T08:00:00", 10 + i))
+    con.commit()
+    con.close()
+    monkeypatch.setattr(mod, "DB_PATH", str(db))
+    r = client.get("/api/trips", headers={"Accept-Encoding": "gzip"})
+    assert r.status_code == 200
+    cuerpo = r.get_data()
+    assert r.headers.get("Content-Encoding") == "gzip", (
+        "sin gzip: el mapa y los listados viajan sin comprimir")
+    import gzip as _gz
+    assert len(json.loads(_gz.decompress(cuerpo))) == 24
+
+
+def test_mapa_puede_pedirse_sin_tracks(client, tmp_path, monkeypatch):
+    """`?tracks=0` no debe parsear los 180 GPX (1,9 MB) para nada."""
+    mod = sys.modules["webapp_under_test"]
+    db = _bd_minima(tmp_path)
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE positions (id INTEGER PRIMARY KEY, session_id "
+                "INTEGER, timestamp TEXT, lat REAL, lon REAL, gps_speed REAL)")
+    con.execute("INSERT INTO positions (session_id, timestamp, lat, lon, "
+                "gps_speed) VALUES (1, '2026-10-28T14:11:00', 43.36, -5.85, 80)")
+    con.commit()
+    con.close()
+    monkeypatch.setattr(mod, "DB_PATH", str(db))
+
+    llamadas = []
+    monkeypatch.setattr(mod, "parse_gpx", lambda ruta: llamadas.append(ruta) or [])
+    r = client.get("/api/map?session_id=1&tracks=0")
+    assert r.status_code == 200
+    assert llamadas == [], "se han parseado los GPX con tracks=0"
+    assert len(r.get_json()["positions"]) == 1

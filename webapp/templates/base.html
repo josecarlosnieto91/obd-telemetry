@@ -3,9 +3,17 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#111111">
     <title>{% block title %}OBD Telemetry{% endblock %}</title>
+    <link rel="icon" href="/favicon.ico" type="image/svg+xml">
     <link rel="stylesheet" href="/static/style.css?v={{ static_v }}">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+    <!-- Chart.js LOCAL (static/): antes venía de jsdelivr y el gráfico del
+         dashboard se quedaba vacío cuando la tablet no tenía Internet, que es
+         justo el caso normal conduciendo. -->
+    <script src="/static/chart.umd.min.js?v={{ static_v }}"></script>
+    <!-- Navegación con mando + «Inicio»: el kiosco muestra esta app en un iframe,
+         y sin esto dentro de Coches/OBD no se puede navegar ni volver con el mando -->
+    <script src="/static/nav.js"></script>
 </head>
 <body>
     <nav>
@@ -15,11 +23,12 @@
             <a href="/" {% if request.path == '/' %}class="active"{% endif %}>Dashboard</a>
             <a href="/trips" {% if 'trips' in request.path %}class="active"{% endif %}>Viajes</a>
             <a href="/alerts" {% if 'alerts' in request.path %}class="active"{% endif %}>Alertas</a>
+            <a href="/dtcs" {% if 'dtcs' in request.path %}class="active"{% endif %}>DTCs</a>
             <a href="/map" {% if 'map' in request.path %}class="active"{% endif %}>Mapa</a>
             <a href="/refuels" {% if 'refuels' in request.path %}class="active"{% endif %}>Repostajes</a>
             <a href="/maintenance" {% if 'maintenance' in request.path %}class="active"{% endif %}>Consejos</a>
         </div>
-        <div class="nav-status" id="nav-status">● Desconectado</div>
+        <div class="nav-status" id="nav-status" role="status" aria-live="polite">● Desconectado</div>
     </nav>
     <main>
         {% block content %}{% endblock %}

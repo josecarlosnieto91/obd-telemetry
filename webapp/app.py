@@ -7,23 +7,28 @@ import sqlite3
 import json
 import os
 import sys
+import gzip
 from datetime import datetime, timedelta
-from flask import Flask, render_template, jsonify, request
+from flask import Flask, render_template, jsonify, request, Response
 
 app = Flask(__name__)
 
 
 @app.context_processor
 def _static_version():
-    """Sella la hoja de estilo con su fecha de modificación.
+    """Sella los estáticos con la fecha del más reciente de la carpeta.
 
     Sin esto el navegador sirve la copia cacheada y un cambio de CSS «no se
     aplica»: se diagnostica como si la regla no existiera cuando lo que pasa es
     que no ha llegado. Con ?v=<mtime> cada edición invalida la caché sola.
+    Cubre style.css, nav.js y chart.umd.min.js (Chart.js local, ya sin CDN).
     """
+    carpeta = os.path.join(app.root_path, "static")
     try:
-        v = int(os.path.getmtime(os.path.join(app.root_path, "static", "style.css")))
-    except OSError:
+        v = max(int(os.path.getmtime(os.path.join(carpeta, f)))
+                for f in ("style.css", "nav.js", "chart.umd.min.js")
+                if os.path.exists(os.path.join(carpeta, f)))
+    except (OSError, ValueError):
         v = 0
     return {"static_v": v}
 DB_PATH = os.path.expanduser("~/.hermes/data/obd_telemetry.db")
@@ -49,6 +54,65 @@ def get_db():
     conn.row_factory = sqlite3.Row
     return conn
 
+
+# ── Comodidades de servicio ────────────────────────────────────
+
+FAVICON_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
+    '<rect width="64" height="64" rx="12" fill="#111"/>'
+    '<text x="32" y="45" font-size="38" text-anchor="middle">'
+    '\U0001F697</text></svg>'
+).encode("utf-8")
+
+
+@app.route("/favicon.ico")
+def favicon():
+    """Sin esto el navegador pedía /favicon.ico en cada carga y recibía 404."""
+    r = Response(FAVICON_SVG, mimetype="image/svg+xml")
+    r.headers["Cache-Control"] = "public, max-age=604800"
+    return r
+
+
+@app.route("/health")
+def health():
+    """Sonda barata para el launcher y para el despliegue: no toca los GPX."""
+    try:
+        conn = get_db()
+        row = conn.execute("SELECT MAX(timestamp) FROM readings").fetchone()
+        conn.close()
+        ultima = row[0] if row else None
+        return jsonify({"ok": True, "db": DB_PATH, "ultima_lectura": ultima})
+    except Exception as e:  # BD ausente o ilegible: se dice, no se finge
+        return jsonify({"ok": False, "error": str(e)}), 503
+
+
+@app.after_request
+def _comprimir(resp):
+    """gzip en las respuestas grandes.
+
+    /api/map devolvía 1 MB por la tailnet sin comprimir (medido 2026-10-28) y
+    el mapa se abre desde el móvil. `send_file` (los estáticos) va en modo
+    direct_passthrough y no se toca.
+    """
+    if resp.direct_passthrough or resp.status_code >= 300:
+        return resp
+    if resp.mimetype not in ("application/json", "text/html", "text/css",
+                             "application/javascript", "image/svg+xml"):
+        return resp
+    if request.accept_encodings.find("gzip") < 0:
+        return resp
+    if resp.content_length is not None and resp.content_length < 800:
+        return resp
+    datos = resp.get_data()
+    comprimido = gzip.compress(datos, 6)
+    if len(comprimido) >= len(datos):
+        return resp
+    resp.set_data(comprimido)
+    resp.headers["Content-Encoding"] = "gzip"
+    resp.headers["Content-Length"] = str(len(comprimido))
+    resp.headers.add("Vary", "Accept-Encoding")
+    return resp
+
 # ── API Routes ─────────────────────────────────────────────────
 
 @app.route("/api/status")
@@ -56,15 +120,15 @@ def api_status():
     """Current vehicle status"""
     conn = get_db()
     c = conn.cursor()
-    
+
     # Latest reading
     c.execute("SELECT * FROM readings ORDER BY id DESC LIMIT 1")
     latest = c.fetchone()
-    
+
     # Active session
     c.execute("SELECT * FROM sessions WHERE status = 'active' LIMIT 1")
     session = c.fetchone()
-    
+
     # Unacknowledged alerts
     c.execute("SELECT COUNT(*) FROM alerts WHERE acknowledged = 0 AND severity IN ('critical', 'warning')")
     alert_count = c.fetchone()[0]
@@ -101,7 +165,7 @@ def api_status():
             print(f"[webapp] fuel_remaining error: {e}", file=sys.stderr)
 
     conn.close()
-    
+
     if latest:
         return jsonify({
             "connected": True,
@@ -167,6 +231,22 @@ def api_trips():
         FROM sessions ORDER BY start_time DESC LIMIT 50
     """)
     trips = [dict(row) for row in c.fetchall()]
+    # Una sola consulta para todos los viajes sin consumo real (antes: un
+    # SELECT por viaje, hasta 50 seguidos). El consumo estimado por MAF se
+    # calcula solo para los que no tienen real_l100.
+    sin_real = [t["id"] for t in trips if t.get("real_l100") is None]
+    estimado = {sid: [] for sid in sin_real}
+    if sin_real:
+        marcas = ",".join("?" * len(sin_real))
+        c.execute(
+            "SELECT session_id, maf, speed FROM readings "
+            f"WHERE maf IS NOT NULL AND speed > 3 AND session_id IN ({marcas})",
+            sin_real,
+        )
+        for r in c.fetchall():
+            l100 = (r["maf"] / 740.0) * 3600.0 / r["speed"] * 100.0
+            if 0 < l100 < 60:
+                estimado[r["session_id"]].append(l100)
     for t in trips:
         # El consumo que se enseña es el REAL (depósito a depósito, calibrado
         # contra el surtidor). El del cuadro (consumption_l100) marca ~la mitad
@@ -176,16 +256,7 @@ def api_trips():
             t["consumo_l100"] = t["real_l100"]
             continue
         # Viajes anteriores a la columna real_l100: estimación con MAF
-        c.execute(
-            "SELECT maf, speed FROM readings WHERE session_id=? AND maf IS NOT NULL",
-            (t["id"],),
-        )
-        inst = []
-        for r in c.fetchall():
-            if r["speed"] and r["speed"] > 3:
-                l100 = (r["maf"] / 740.0) * 3600.0 / r["speed"] * 100.0
-                if 0 < l100 < 60:
-                    inst.append(l100)
+        inst = estimado.get(t["id"]) or []
         t["consumo_l100"] = round(sum(inst) / len(inst), 1) if inst else None
     conn.close()
     return jsonify(trips)
@@ -196,27 +267,33 @@ def api_trip_detail(trip_id):
     """Detailed data for a specific trip"""
     conn = get_db()
     c = conn.cursor()
-    
+
     c.execute("SELECT * FROM sessions WHERE id = ?", (trip_id,))
-    trip = dict(c.fetchone())
-    
+    fila = c.fetchone()
+    if fila is None:
+        # Antes: dict(None) → TypeError → HTTP 500. Un viaje que no existe es
+        # un 404, y el enlace ?trip=<id> de los resúmenes puede llegar viejo.
+        conn.close()
+        return jsonify({"error": "trip not found", "id": trip_id}), 404
+    trip = dict(fila)
+
     c.execute("""
-        SELECT timestamp, rpm, speed, coolant_temp, engine_load, 
+        SELECT timestamp, rpm, speed, coolant_temp, engine_load,
                throttle_pos, fuel_level, voltage
         FROM readings WHERE session_id = ? ORDER BY timestamp
     """, (trip_id,))
     readings = [dict(row) for row in c.fetchall()]
-    
+
     c.execute("SELECT * FROM dtc WHERE session_id = ?", (trip_id,))
     dtcs = [dict(row) for row in c.fetchall()]
-    
+
     c.execute("""
-        SELECT * FROM alerts WHERE session_id = ? 
+        SELECT * FROM alerts WHERE session_id = ?
         AND category IN ('conduccion', 'mantenimiento', 'uso')
         ORDER BY id
     """, (trip_id,))
     tips = [dict(row) for row in c.fetchall()]
-    
+
     conn.close()
     return jsonify({"trip": trip, "readings": readings, "dtcs": dtcs, "tips": tips})
 
@@ -298,28 +375,28 @@ def api_stats():
     """Overall statistics"""
     conn = get_db()
     c = conn.cursor()
-    
+
     c.execute("SELECT COUNT(*), COALESCE(SUM(distance_km), 0), COALESCE(SUM(driving_minutes), 0) FROM sessions WHERE status = 'completed'")
     row = c.fetchone()
     total_trips = row[0] or 0
     total_km = round(row[1] or 0, 1)
     total_minutes = row[2] or 0
-    
+
     # Trips this week
     week_ago = (datetime.now() - timedelta(days=7)).isoformat()
     c.execute("SELECT COUNT(*), COALESCE(SUM(distance_km), 0) FROM sessions WHERE start_time >= ? AND status = 'completed'", (week_ago,))
     row = c.fetchone()
     week_trips = row[0] or 0
     week_km = round(row[1] or 0, 1)
-    
+
     # Max speed ever
     c.execute("SELECT MAX(max_speed) FROM sessions")
     max_speed = c.fetchone()[0] or 0
-    
+
     # Alerts this week
     c.execute("SELECT COUNT(*) FROM alerts WHERE timestamp >= ?", (week_ago,))
     week_alerts = c.fetchone()[0] or 0
-    
+
     conn.close()
     return jsonify({
         "total_trips": total_trips,
@@ -583,6 +660,27 @@ def parse_gpx(path):
     return pts
 
 
+# Caché de GPX ya parseados: clave = ruta, valor = ((mtime_ns, tamaño), puntos).
+# Sin esto cada visita al mapa releía y parseaba los 180 GPX (1,9 MB) aunque el
+# cliente solo pidiera un viaje; medido 2026-10-28: 69 ms y creciendo.
+_gpx_cache = {}
+
+
+def parse_gpx_cached(path):
+    """parse_gpx con caché invalidada por mtime+tamaño del fichero."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return []
+    clave = (st.st_mtime_ns, st.st_size)
+    guardado = _gpx_cache.get(path)
+    if guardado and guardado[0] == clave:
+        return guardado[1]
+    pts = parse_gpx(path)
+    _gpx_cache[path] = (clave, pts)
+    return pts
+
+
 @app.route("/map")
 def map_view():
     return render_template("map.html")
@@ -591,35 +689,54 @@ def map_view():
 @app.route("/api/map")
 def api_map():
     """Posiciones GPS (+ tracks GPX) para pintar en el mapa.
+
     ?session_id=N → solo las posiciones de esa sesión (historial por viaje).
-    ?date=YYYY-MM-DD → solo posiciones de ese día (selector de calendario)."""
+    ?date=YYYY-MM-DD → solo posiciones de ese día (selector de calendario).
+    ?tracks=0 → no devolver los tracks GPX (el cliente no los va a pintar).
+    ?limit=N → como mucho N posiciones (las más recientes).
+    """
     session_id = request.args.get("session_id", type=int)
     date = request.args.get("date")
+    limit = request.args.get("limit", type=int)
+    con_tracks = request.args.get("tracks", "1") != "0"
     conn = get_db()
     c = conn.cursor()
+    params = ()
     if session_id:
-        c.execute(
-            "SELECT timestamp, lat, lon, gps_speed FROM positions WHERE session_id=? ORDER BY id",
-            (session_id,),
-        )
+        sql = ("SELECT timestamp, lat, lon, gps_speed FROM positions "
+               "WHERE session_id=? ORDER BY id")
+        params = (session_id,)
+        if limit:
+            sql = ("SELECT timestamp, lat, lon, gps_speed FROM positions "
+                   "WHERE session_id=? ORDER BY id DESC LIMIT ?")
+            params = (session_id, limit)
     elif date:
-        c.execute(
-            "SELECT timestamp, lat, lon, gps_speed FROM positions WHERE timestamp LIKE ? ORDER BY id",
-            (date + "%",),
-        )
+        sql = ("SELECT timestamp, lat, lon, gps_speed FROM positions "
+               "WHERE timestamp LIKE ? ORDER BY id")
+        params = (date + "%",)
+        if limit:
+            sql = ("SELECT timestamp, lat, lon, gps_speed FROM positions "
+                   "WHERE timestamp LIKE ? ORDER BY id DESC LIMIT ?")
+            params = (date + "%", limit)
     else:
-        c.execute(
-            "SELECT timestamp, lat, lon, gps_speed FROM positions ORDER BY id"
-        )
+        sql = ("SELECT timestamp, lat, lon, gps_speed FROM positions "
+               "ORDER BY id")
+        if limit:
+            sql = ("SELECT timestamp, lat, lon, gps_speed FROM positions "
+                   "ORDER BY id DESC LIMIT ?")
+            params = (limit,)
+    c.execute(sql, params)
     positions = [dict(r) for r in c.fetchall()]
+    if limit:
+        positions.reverse()   # devolver siempre en orden temporal
     conn.close()
 
     tracks = []
     tracks_dir = os.path.expanduser("~/.hermes/data/tracks")
-    if os.path.isdir(tracks_dir):
+    if con_tracks and os.path.isdir(tracks_dir):
         for f in sorted(os.listdir(tracks_dir)):
             if f.endswith(".gpx"):
-                pts = parse_gpx(os.path.join(tracks_dir, f))
+                pts = parse_gpx_cached(os.path.join(tracks_dir, f))
                 if pts:
                     tracks.append({"name": f, "points": pts})
 

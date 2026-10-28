@@ -10,9 +10,9 @@
 </div>
 
 <!-- Trip detail modal -->
-<div id="trip-modal" class="modal" style="display:none">
+<div id="trip-modal" class="modal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="trip-modal-title">
     <div class="modal-content">
-        <span class="close" onclick="closeModal()">&times;</span>
+        <button type="button" class="close" onclick="closeModal()" aria-label="Cerrar">&times;</button>
         <div id="trip-detail">Cargando...</div>
     </div>
 </div>
@@ -67,8 +67,16 @@ async function loadTrips() {
 
 async function showTrip(id) {
     const r = await fetch(`/api/trip/${id}`);
-    const d = await r.json();
     const el = document.getElementById('trip-detail');
+    if (!r.ok) {
+        // 404: viaje inexistente (enlaces viejos de los resúmenes de viaje)
+        el.innerHTML = `<h2 id="trip-modal-title">Viaje ${id}</h2>
+            <p class="muted">Ese viaje no existe (puede haberse fusionado con otro o haberse reprocesado).</p>
+            <p><a class="btn" href="/trips">Ver todos los viajes</a></p>`;
+        document.getElementById('trip-modal').style.display = 'flex';
+        return;
+    }
+    const d = await r.json();
     const t = d.trip;
 
     const start = t.start_time ? new Date(t.start_time).toLocaleString('es') : '—';
@@ -76,7 +84,7 @@ async function showTrip(id) {
     const dur = t.driving_minutes ? `${t.driving_minutes} min` : '—';
     const dist = t.distance_km ? `${t.distance_km.toFixed(2)} km` : '?';
 
-    let html = `<h2>Viaje del ${start}</h2>
+    let html = `<h2 id="trip-modal-title">Viaje del ${start}</h2>
         <div class="stats-grid mini">
             <div class="stat-card"><div class="stat-label">Distancia</div><div class="stat-value">${dist}</div></div>
             <div class="stat-card"><div class="stat-label">Duración</div><div class="stat-value">${dur}</div></div>
@@ -141,8 +149,24 @@ async function showTrip(id) {
 
 function closeModal() {
     document.getElementById('trip-modal').style.display = 'none';
+    // Si se abrió por enlace directo (/trips?trip=123), se limpia la URL para
+    // que recargar no vuelva a abrir el mismo viaje.
+    if (new URLSearchParams(location.search).has('trip')) {
+        history.replaceState(null, '', '/trips');
+    }
 }
 
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeModal();
+});
+
 loadTrips();
+
+// Enlace permanente a un viaje: /trips?trip=<id> abre su detalle.
+// Es el destino de los enlaces que se ponen en los resúmenes de viaje.
+const tripParam = parseInt(new URLSearchParams(location.search).get('trip'), 10);
+if (!Number.isNaN(tripParam)) {
+    showTrip(tripParam);
+}
 </script>
 {% endblock %}
