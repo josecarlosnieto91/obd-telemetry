@@ -47,3 +47,23 @@ def test_connect_es_idempotente(tmp_path):
                     "AND name='idx_can_readings_ts'").fetchone()[0]
     assert n == 1
     con.close()
+
+
+def test_fichero_entrante_vacio_se_aparta_y_no_se_procesa(tmp_path, monkeypatch):
+    """Un sync de 0 bytes (SCP copiando mientras el colector escribe) se perdía en
+    silencio: SQLite abría el fichero como BD vacía y el import salía «completed».
+    Visto el 2026-10-29 13:26. Ahora se aparta, se anota y la tablet lo reenvía."""
+    im = _load()
+    incoming = tmp_path / "polar_obd_local.db"
+    incoming.write_bytes(b"")
+    processed = tmp_path / "processed"
+    processed.mkdir()
+    monkeypatch.setattr(im, "INCOMING", str(incoming))
+    monkeypatch.setattr(im, "PROCESSED_DIR", str(processed))
+    monkeypatch.setattr(im, "TARGET_DB", str(tmp_path / "maestra.db"))
+
+    assert im.main() == 0
+    assert not incoming.exists(), "el fichero vacío debería apartarse"
+    assert (tmp_path / "polar_obd_local.db.vacio").exists()
+    log = (processed / "import.log").read_text()
+    assert "vacío/truncado" in log

@@ -399,6 +399,22 @@ def main():
     if not os.path.exists(INCOMING):
         return 0  # silencio: no hay datos entrantes
 
+    # Fichero de 0 bytes o truncado: el SCP copió antes de que el colector
+    # terminara de escribir (visto el 2026-10-29 a las 13:26: el sync se perdió
+    # sin una sola línea de rastro). Un SQLite de 0 bytes se abre como BD vacía
+    # y el import sale «completed» sin importar nada. Se aparta para que el
+    # siguiente sync lo reemplace y queda anotado en el log.
+    try:
+        tam = os.path.getsize(INCOMING)
+        if tam < 1024:
+            os.replace(INCOMING, INCOMING + ".vacio")
+            with open(os.path.join(PROCESSED_DIR, "import.log"), "a") as lf:
+                lf.write(f"{datetime.datetime.now().isoformat()} fichero entrante "
+                         f"vacío/truncado ({tam} B): apartado, la tablet lo reenvía\n")
+            return 0
+    except OSError:
+        pass
+
     try:
         local_conn = connect_db(INCOMING, wal=False)
         target_conn = connect_db(TARGET_DB)
